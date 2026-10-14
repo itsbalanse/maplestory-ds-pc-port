@@ -1,0 +1,10 @@
+# Copyrighted game data and large generated files - never commit
+*.nds
+*.sav
+extracted/
+build/
+work/
+thirdparty/
+tools/dsharness/*.exe
+__pycache__/
+*.pyc
