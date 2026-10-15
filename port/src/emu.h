@@ -10,6 +10,7 @@ namespace melonDS { class NDS; }
 class Emu {
 public:
     static inline bool verbose = false;
+    static inline std::string savOverride;            // save file path override (tests)
     static inline bool forceInterpreter = false;  // --interp: run ARM9 in the melonDS interpreter
 
     Emu();

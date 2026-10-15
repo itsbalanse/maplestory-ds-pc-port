@@ -1,0 +1,36 @@
+// Scripted input for automated tests (--test-script FILE), same commands as tools/dsharness:
+//   wait N | press KEY [N] | hold KEY | release KEY | touch X Y [N] | shot NAME
+//   until X Y RRGGBB [TIMEOUT]             wait until the pixel (X, Y on the 256x384 stack) has that colour
+//   pressuntil KEY X Y RRGGBB [TIMEOUT]    press KEY every 40 frames until that pixel colour shows
+// KEY: A B SELECT START RIGHT LEFT UP DOWN R L X Y
+#pragma once
+#include <cstdint>
+#include <functional>
+#include <string>
+#include <vector>
+
+class TestScript {
+public:
+    bool load(const std::string& path);
+    // Advance one frame. Fills the DS key mask (active-low) and touch state, and returns the
+    // names of screenshots to take after this frame. done() becomes true when the script ends.
+    void frame(uint32_t& keyMask, bool& touching, int& tx, int& ty, std::vector<std::string>& shots);
+    std::function<uint32_t(int, int)> pixel;  // reads the current frame (0x00RRGGBB)
+    bool failed() const { return failed_; }
+    bool done() const { return pc_ >= cmds_.size() && wait_ == 0 && !waitingPixel_ && pulseLeft_ == 0 && touchLeft_ == 0; }
+
+private:
+    struct Cmd { std::string op; std::vector<std::string> args; };
+    std::vector<Cmd> cmds_;
+    size_t pc_ = 0;
+    int wait_ = 0;
+    uint32_t held_ = 0;      // bits of keys held down
+    uint32_t pulse_ = 0;     // key held for the current press
+    int pulseLeft_ = 0, releaseLeft_ = 0;
+    bool touching_ = false;
+    int tx_ = 0, ty_ = 0, touchLeft_ = 0;
+    // until / pressuntil
+    bool waitingPixel_ = false, failed_ = false;
+    int px_ = 0, py_ = 0, pTimeout_ = 0, pTimer_ = 0;
+    uint32_t pColor_ = 0, pKey_ = 0;
+};

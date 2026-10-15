@@ -331,6 +331,15 @@ void callAt(uint32_t target) {
     // Code with no recompiled version (e.g. generated or copied into the heap at runtime):
     // run it in melonDS's ARM9 interpreter until it returns to a recompiled frame.
     if ((target >> 24) == 0x02 || target < C.itcm_size) {
+        static int logged = 0;
+        if ((target < 0x0216fd00u || target >= 0x02172000u) && logged == 0) {
+            if (FILE* f = fopen("ram_miss.bin", "wb")) { fwrite(g_nds->MainRAM, 1, 0x400000, f); fclose(f); }
+        }
+        if ((target < 0x0216fd00u || target >= 0x02172000u) && logged++ < 40) {
+            int ov = residentOverlay(target);
+            logf("[rt] no recompiled code at %08x (lr=%08x, table candidates: %zu, resident overlay %d): interpreting\n",
+                 target, C.r[14], g_fnmap.count(target) ? g_fnmap[target].e.size() : (size_t)0, ov);
+        }
         interpretAt(origTarget);
         return;
     }

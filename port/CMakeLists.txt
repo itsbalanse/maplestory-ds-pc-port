@@ -38,6 +38,7 @@ add_executable(MapleStoryDS WIN32
     src/input.cpp
     src/ui.cpp
     src/platform.cpp
+    src/testscript.cpp
     runtime/runtime.cpp
 )
 target_include_directories(MapleStoryDS PRIVATE src runtime ${MELONDS_DIR}/src)

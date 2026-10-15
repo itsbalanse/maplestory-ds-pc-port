@@ -31,6 +31,7 @@ bool Emu::loadRom(const std::string& romPath, std::string& err) {
     if (rom.size() < 0x200) { err = "Could not read ROM: " + romPath; return false; }
     romPath_ = romPath;
     savPath_ = romPath.substr(0, romPath.find_last_of('.')) + ".sav";
+    if (!savOverride.empty()) savPath_ = savOverride;  // tests use their own save file
 
     NDSCart::NDSCartArgs cargs{};
     auto sav = readFile(savPath_);

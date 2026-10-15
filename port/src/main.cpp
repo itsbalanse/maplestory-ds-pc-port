@@ -19,6 +19,7 @@
 #include "input.h"
 #include "ui.h"
 #include "runtime.h"
+#include "testscript.h"
 
 namespace fs = std::filesystem;
 
@@ -145,6 +146,7 @@ int main(int argc, char** argv) {
     int testFrames = 0;
     std::string testShot;
     bool testEditor = false;
+    std::string testScriptPath, testSave;
     for (int i = 1; i < argc; i++) {
         std::string a = argv[i];
         if (a == "--verbose") Emu::verbose = true;
@@ -153,12 +155,19 @@ int main(int argc, char** argv) {
         else if (a == "--test-shot" && i + 1 < argc) testShot = argv[++i];
         else if (a == "--test-editor") testEditor = true;
         else if (a == "--mute") cfg.mute = true;
+        else if (a == "--test-script" && i + 1 < argc) testScriptPath = argv[++i];
+        else if (a == "--test-save" && i + 1 < argc) testSave = argv[++i];
         else cfg.rom = a;
     }
     if (cfg.rom.empty() || !fs::exists(fs::u8path(cfg.rom))) cfg.rom = findRom(base);
     if (cfg.rom.empty()) cfg.rom = pickRomDialog();
     if (cfg.rom.empty()) return 0;
 
+    // Self-tests never touch the player's save: they start from an empty one unless --test-save is given.
+    if (testFrames > 0 || !testScriptPath.empty()) {
+        if (testSave.empty()) { testSave = base + "test.sav"; remove(testSave.c_str()); }
+        Emu::savOverride = testSave;
+    }
     Emu emu;
     std::string err;
     if (!emu.loadRom(cfg.rom, err)) {
@@ -167,7 +176,17 @@ int main(int argc, char** argv) {
     }
 
     // Self-tests run in the background: hidden window, no sound, no frame pacing.
-    const bool headless = testFrames > 0;
+    TestScript script;
+    if (!testScriptPath.empty() && !script.load(testScriptPath)) {
+        fprintf(stderr, "cannot read test script %s\n", testScriptPath.c_str());
+        return 1;
+    }
+    const bool headless = testFrames > 0 || !testScriptPath.empty();
+    script.pixel = [&emu](int x, int y) -> uint32_t {
+        if (x < 0 || x > 255 || y < 0 || y > 383) return 0;
+        const uint32_t* scr = emu.screen(y >= 192 ? 1 : 0);
+        return scr ? scr[(y % 192) * 256 + x] & 0xFFFFFF : 0;
+    };
     SDL_Window* win = SDL_CreateWindow("MapleStory DS", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
                                        cfg.winW, cfg.winH,
                                        SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI | (headless ? SDL_WINDOW_HIDDEN : 0));
@@ -198,6 +217,7 @@ int main(int argc, char** argv) {
     std::vector<int16_t> abuf(8192 * 2);
     Uint64 freq = SDL_GetPerformanceFrequency(), next = SDL_GetPerformanceCounter();
     bool running = true, paused = false;
+    int exitCode = 0;
     bool touching = false;
     int tx = 0, ty = 0;
     std::string statePath = cfg.rom.substr(0, cfg.rom.find_last_of('.')) + ".state";
@@ -287,6 +307,33 @@ int main(int argc, char** argv) {
         if (!paused && !ui.editorOpen()) {
             uint32_t mask = input.dsKeyMask();
             int frames = ff ? 4 : 1;
+            if (!testScriptPath.empty()) {
+                std::vector<std::string> shots;
+                script.frame(mask, touching, tx, ty, shots);
+                frames = 1;
+                emu.runFrame(mask, touching, tx, ty);
+                for (auto& name : shots) {
+                    SDL_Surface* s = SDL_CreateRGBSurfaceWithFormat(0, 256, 384, 32, SDL_PIXELFORMAT_ARGB8888);
+                    memcpy(s->pixels, emu.screen(0), 256 * 192 * 4);
+                    memcpy((uint8_t*)s->pixels + 256 * 192 * 4, emu.screen(1), 256 * 192 * 4);
+                    SDL_SaveBMP(s, (name + ".bmp").c_str());
+                    SDL_FreeSurface(s);
+                }
+                if (script.done()) {
+                    running = false;
+                    if (recomp::active()) recomp::dumpStats();
+                    recomp::traceStop();
+                    if (script.failed()) {
+                        exitCode = 2;
+                        SDL_Surface* s = SDL_CreateRGBSurfaceWithFormat(0, 256, 384, 32, SDL_PIXELFORMAT_ARGB8888);
+                        memcpy(s->pixels, emu.screen(0), 256 * 192 * 4);
+                        memcpy((uint8_t*)s->pixels + 256 * 192 * 4, emu.screen(1), 256 * 192 * 4);
+                        SDL_SaveBMP(s, "fail.bmp");
+                        SDL_FreeSurface(s);
+                    }
+                }
+                frames = 0;
+            }
             for (int i = 0; i < frames; i++) emu.runFrame(mask, touching, tx, ty);
             int n;
             while ((n = emu.readAudio(abuf.data(), (int)abuf.size() / 2)) > 0) {
@@ -339,5 +386,5 @@ int main(int argc, char** argv) {
     SDL_DestroyRenderer(ren);
     SDL_DestroyWindow(win);
     SDL_Quit();
-    return 0;
+    return exitCode;
 }
