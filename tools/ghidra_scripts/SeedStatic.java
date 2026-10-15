@@ -28,6 +28,8 @@ public class SeedStatic extends GhidraScript {
             if (!thumb) return false;  // only trust odd (Thumb) pointers enough to override data
             removeData(d);
         }
+        // something other than undefined bytes can sit here (Ghidra refuses to disassemble it)
+        if (thumb) clearListing(a, a.add(1));
         try {
             currentProgram.getProgramContext().setValue(tmode, a, a, BigInteger.valueOf(thumb ? 1 : 0));
         } catch (Exception e) { return false; }
