@@ -47,6 +47,10 @@ fully rebindable).
 * Indirect branches/calls (`BX reg`, `BLX reg`, `LDR pc`, `POP {pc}` with a non-LR value,
   vtables, jump tables) go through a dispatcher: address → host function. Jump tables are
   recognised statically; unknown targets are logged so they can be added.
+* Hand-written assembly with its own calling conventions (the Mobiclip movie decoder) is
+  emitted as one C function over the whole code image: every instruction is a label, branches
+  and calls inside it are gotos, and indirect jumps/returns go through one switch. Only
+  transfers that leave the image use the call/return protocol above.
 * Function discovery: Ghidra's function list as seeds, then recursive descent (BL targets,
   literal-pool code pointers, vtables), per code region (static, ITCM, DTCM, each overlay).
 * Overlays share load addresses, so each overlay is compiled separately; the runtime hooks

@@ -35,6 +35,7 @@ void rt_watch(Cpu*, uint32_t addr, uint32_t size, uint32_t val);
 
 extern int g_rt_trace;
 int rt_trace(Cpu*, uint32_t addr);   // nonzero: the runtime already executed the function (debug)
+void rt_img_step(Cpu*, uint32_t addr);  // per-instruction trace of code images (debug, MSDS_IMG_STEP build)
 #define TRACE_ENTRY(a) do { if (__builtin_expect(g_rt_trace, 0) && rt_trace(c, (a))) return; } while (0)
 
 #define SS_PUSH(a) (c->ss[c->ssp++] = (a))

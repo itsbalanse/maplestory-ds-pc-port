@@ -104,6 +104,15 @@ def in_itcm_overlay(a):
     return ITCM_SWAP[0] <= a < ITCM_SWAP[1]
 
 
+# hand-written code images emitted as a single function each (pseudo-overlay space -> address range)
+IMAGES = {'ov200': ITCM_SWAP}
+
+
+def image_wrapper(space, addr):
+    return ('void f_%s_%08x(Cpu* c) {\n    CHECK();\n    TRACE_ENTRY(0x%08xu);\n    img_%s(c, 0x%08xu);\n}'
+            % (space, addr, addr, space, addr))
+
+
 def image_of(fn):
     if fn.space != 'ram':
         return fn.space
@@ -129,6 +138,8 @@ class Emitter:
         self.static_spaces = {'ram'}
         self.unknown_regs = collections.Counter()
         self.unknown_ops = collections.Counter()
+        self.img = None  # set while emitting a whole code image as one function (see emit_image)
+        self.u_last = {}  # unique offset -> size of its last write in the current instruction
 
     # ------------------------------------------------------------- varnodes
     def regname(self, v):
@@ -155,6 +166,14 @@ class Emitter:
             locals_[('reg', n, v.size)] = 1
             return 'R_%s_%d' % (n, v.size)
         if v.space == 'u':
+            # P-code may read part of a wider temporary (e.g. smulbb: 64-bit product, 32-bit COPY of its
+            # low half). Temporaries are C variables named by offset and size, so read the written one.
+            for k in range(8):
+                w = self.u_last.get(v.off - k)
+                if w is not None and k + v.size <= w and (k or w != v.size):
+                    return '((%s)(%s >> %d))' % (CTYPE[v.size], 'u_%x_%d' % (v.off - k, w), 8 * k)
+                if w is not None:
+                    break
             locals_[('u', v.off, v.size)] = 1
             return 'u_%x_%d' % (v.off, v.size)
         if v.space in ('m', 'o'):
@@ -172,6 +191,7 @@ class Emitter:
             return 'R_%s_%d' % (n, v.size)
         if v.space == 'u':
             locals_[('u', v.off, v.size)] = 1
+            self.u_last[v.off] = v.size
             return 'u_%x_%d' % (v.off, v.size)
         raise ValueError('cannot write varnode space %s' % v.space)
 
@@ -247,6 +267,7 @@ class Emitter:
                 flush()
                 L.append('L_%08x:' % ins.addr)
             L.append('    /* %08x: %s */' % (ins.addr, ins.text.replace('*/', '* /')))
+            self.u_last = {}
             pending += 1
             nxt = fn.insns[idx + 1].addr if idx + 1 < len(fn.insns) else None
             fallthrough_addr = ins.addr + ins.length
@@ -313,6 +334,127 @@ class Emitter:
         out.append(body)
         out.append('}')
         return '\n'.join(out)
+
+    def emit_image(self, name, fns, lo, hi):
+        """Emit every instruction of a hand-written code image as one C function
+        `void name(Cpu* c, uint32_t at)` that starts at `at`. Its own calling conventions
+        (`adr lr` + branch as a call, `mov pc, lr` returns, computed jumps) stay inside one C frame:
+        transfers within the image are gotos, indirect ones go through a switch over all
+        instructions. Only transfers out of the image use the runtime's call/return protocol."""
+        insns = {}
+        for f in fns:
+            for i in f.insns:
+                if lo <= i.addr < hi:
+                    insns.setdefault(i.addr, i)
+        assert not any(i.thumb for i in insns.values()), 'image emitter handles ARM code only'
+        fn = Func(lo, False, fns[0].space, name)
+        fn.ranges = [(lo, hi)]
+        fn.insns = [insns[a] for a in sorted(insns)]
+        self.img = set(insns)
+        self.cur_dense = False
+        self.cur_ret_sites = []
+        L, locals_ = [], collections.OrderedDict()
+        pending = 0
+
+        def flush():
+            nonlocal pending
+            if pending:
+                L.append('    CYC(%d);' % pending)
+                pending = 0
+
+        for idx, ins in enumerate(fn.insns):
+            flush()
+            L.append('L_%08x:' % ins.addr)
+            L.append('    /* %08x: %s */' % (ins.addr, ins.text.replace('*/', '* /')))
+            L.append('    IMG_STEP(0x%08xu);' % ins.addr)
+            self.u_last = {}
+            pending += 1
+            fall = ins.addr + ins.length
+            rel = set()
+            for k, (opc, out, ins_) in enumerate(ins.ops):
+                if opc in ('BRANCH', 'CBRANCH') and ins_[0].space == 'c':
+                    rel.add(k + ins_[0].off if ins_[0].off < 0x80000000 else k + ins_[0].off - (1 << 64))
+            cp = self.cp15(ins)
+            if cp is not None:
+                L.extend(cp)
+                transfer = False
+            else:
+                transfer = False
+                for k, (opc, out, ins_) in enumerate(ins.ops):
+                    if k in rel:
+                        L.append('  P_%08x_%d:;' % (ins.addr, k))
+                    line, transfer = self.emit_op(fn, ins, k, opc, out, ins_, locals_, flush, fall)
+                    if line:
+                        L.extend(line if isinstance(line, list) else [line])
+                if len(ins.ops) in rel:
+                    L.append('  P_%08x_%d:;' % (ins.addr, len(ins.ops)))
+            nxt = fn.insns[idx + 1].addr if idx + 1 < len(fn.insns) else None
+            if nxt != fall and not transfer:
+                flush()
+                L.append('    _t = 0x%08xu; goto dispatch;' % fall)
+        flush()
+        cases = ' '.join('case 0x%08xu: goto L_%08x;' % (a, a) for a in sorted(insns))
+        out = ['#define IMG_IN(a) ((uint32_t)((a) - 0x%08xu) < 0x%xu)' % (lo, hi - lo),
+               'void %s(Cpu* c, uint32_t at) {' % name, '    uint32_t _t = at;']
+        for key in locals_:
+            if key[0] == 'u':
+                out.append('    %s u_%x_%d;' % (CTYPE.get(key[2], 'uint64_t'), key[1], key[2]))
+            else:
+                out.append('    %s R_%s_%d = 0;' % (CTYPE.get(key[2], 'uint64_t'), key[1], key[2]))
+        out += [
+            'dispatch:',
+            '    CHECK();',
+            '    if (IMG_IN(_t)) {',
+            '        switch (_t) { %s }' % cases,
+            '        rt_missing(c, _t, "jump to an undecoded address in a code image"); return;',
+            '    }',
+            '    /* leaving the image. With lr pointing into it, this is a call (`adr lr, X` + branch): */',
+            '    /* run the target as a call that is expected to return to lr. */',
+            '    { uint32_t _e = c->r[14] & ~1u;',
+            '      if (IMG_IN(_e) && !rt_in_stack(c, _t & ~1u)) { SS_PUSH(_e); rt_call(c, _t); SS_POP(); goto resolve; }',
+            '      rt_call(c, _t); return; }',
+            'resolve:  /* code outside the image returned to c->ret */',
+            '    for (;;) {',
+            '        if (IMG_IN(c->ret)) { _t = c->ret; goto dispatch; }',
+            '        if (rt_in_stack(c, c->ret)) return;  /* unwinding to an outer frame */',
+            '        rt_call(c, c->ret);                  /* continue at a computed address */',
+            '    }',
+        ]
+        out += L
+        out.append('    _t = 0x%08xu; goto dispatch;' % (fn.insns[-1].addr + fn.insns[-1].length))
+        out.append('}')
+        out.append('#undef IMG_IN')
+        self.img = None
+        return '\n'.join(out)
+
+    def emit_image_op(self, fn, ins, opc, inp, locals_, flush, fall):
+        """Control-flow p-code ops inside emit_image (None: not a control-flow op)."""
+        R = lambda v: self.rd(v, locals_)
+        a = inp[0] if inp else None
+        if opc in ('BRANCH', 'CBRANCH') and a.space != 'c':
+            cond = R(inp[1]) if opc == 'CBRANCH' else None
+            flush()
+            if a.off in self.img:
+                body = '{ CHECK(); goto L_%08x; }' % a.off if a.off <= ins.addr else 'goto L_%08x;' % a.off
+            else:
+                body = '{ _t = 0x%08xu; goto dispatch; }' % a.off
+            return ('    if (%s) %s' % (cond, body) if cond else '    ' + body), cond is None
+        if opc == 'CALL':
+            flush()
+            if a.off in self.img:  # lr was set by the preceding p-code
+                return '    { CHECK(); goto L_%08x; }' % a.off, True
+            return ['    SS_PUSH(0x%08xu); %s SS_POP();' % (fall, self.call_expr(fn, a.off, a.space)),
+                    '    if (c->ret != 0x%08xu) goto resolve;' % fall], False
+        if opc == 'CALLIND':
+            flush()
+            return ['    _t = %s;' % R(a),
+                    '    if (IMG_IN(_t)) goto dispatch;',
+                    '    SS_PUSH(0x%08xu); rt_call(c, _t); SS_POP();' % fall,
+                    '    if (c->ret != 0x%08xu) goto resolve;' % fall], False
+        if opc in ('RETURN', 'BRANCHIND'):
+            flush()
+            return '    { _t = %s; goto dispatch; }' % R(a), True
+        return None
 
     def psr(self, ins):
         """MRS/MSR decoded from the instruction word. Ghidra's ARM spec builds MRS results from the
@@ -498,6 +640,10 @@ class Emitter:
 
         a = inp[0] if inp else None
         b = inp[1] if len(inp) > 1 else None
+        if self.img is not None:
+            r = self.emit_image_op(fn, ins, opc, inp, locals_, flush, fall)
+            if r is not None:
+                return r
         if opc == 'COPY':
             line = assign(R(a))
             if out.space == 'r' and self.regname(out) == 'cpsr':
@@ -727,8 +873,13 @@ def main():
         hdr.append('void %s(Cpu* c);' % fn.cname)
     for fn, a in extra:
         hdr.append('void f_%s_%08x(Cpu* c);' % (fn.space, a))
-    # hand-written assembly regions (movie decoder, ITCM overlay 0): multi-entry variants
-    multi_fns = [f for f in funcs if image_of(f) in ('ov200', 'itcm0')]
+    # the movie decoder (hand-written assembly) is emitted as one function over its whole image;
+    # its Ghidra functions become entry wrappers
+    img_fns = [f for f in funcs if f.space in IMAGES]
+    for sp in sorted({f.space for f in img_fns}):
+        hdr.append('void img_%s(Cpu* c, uint32_t at);' % sp)
+    # other hand-written assembly (ITCM overlay 0): multi-entry variants
+    multi_fns = [f for f in funcs if image_of(f) == 'itcm0']
     for fn in multi_fns:
         hdr.append('void %s_m(Cpu* c, uint32_t at);' % fn.cname)
     for name in sorted(set(OVERRIDES.values())):
@@ -744,7 +895,7 @@ def main():
                 '#pragma GCC diagnostic ignored "-Wunused-label"', '#pragma GCC diagnostic ignored "-Wunused-variable"',
                 '#pragma GCC diagnostic ignored "-Wunused-but-set-variable"', '']
         for fn in chunk:
-            body.append(em.emit_function(fn))
+            body.append(image_wrapper(fn.space, fn.entry) if fn.space in IMAGES else em.emit_function(fn))
             body.append('')
         open(os.path.join(outdir, 'funcs_%03d.c' % nfiles), 'w').write('\n'.join(body))
         nfiles += 1
@@ -752,10 +903,19 @@ def main():
         body = ['/* generated by pcode2c.py - do not edit */', '#include "funcs.h"',
                 '#pragma GCC diagnostic ignored "-Wunused-label"', '']
         for fn, a in extra:
-            body.append(em.emit_function(fn, alt_entry=a))
+            body.append(image_wrapper(fn.space, a) if fn.space in IMAGES else em.emit_function(fn, alt_entry=a))
             body.append('')
         open(os.path.join(outdir, 'funcs_%03d.c' % nfiles), 'w').write('\n'.join(body))
         nfiles += 1
+    for sp in sorted({f.space for f in img_fns}):
+        body = ['/* generated by pcode2c.py - do not edit */', '#include "funcs.h"',
+                '#pragma GCC diagnostic ignored "-Wunused-label"', '#pragma GCC diagnostic ignored "-Wunused-variable"',
+                '#pragma GCC diagnostic ignored "-Wunused-but-set-variable"',
+                '#ifdef MSDS_IMG_STEP  /* debug: per-instruction trace (CMake option MSDS_IMG_STEP) */',
+                '#define IMG_STEP(a) rt_img_step(c, (a))', '#else', '#define IMG_STEP(a) ((void)0)', '#endif', '']
+        lo, hi = IMAGES[sp]
+        body.append(em.emit_image('img_' + sp, [f for f in img_fns if f.space == sp], lo, hi))
+        open(os.path.join(outdir, 'funcs_img_%s.c' % sp), 'w').write('\n'.join(body) + '\n')
     if multi_fns:
         body = ['/* generated by pcode2c.py - do not edit */', '#include "funcs.h"',
                 '#pragma GCC diagnostic ignored "-Wunused-label"', '']
@@ -809,17 +969,23 @@ def main():
         raw = b''.join(i.raw for i in sorted(fn.insns, key=lambda i: i.addr) if i.addr >= a)[:8].ljust(8, bytes(1))
         sig0, sig1 = int.from_bytes(raw[:4], 'little'), int.from_bytes(raw[4:8], 'little')
         rows.append('    {0x%08xu, %d, %d, f_%s_%08x, {0x%08xu, 0x%08xu}, %s},' % (a, sp, int(fn.thumb), fn.space, a, sig0, sig1, body_ref(fn, a, sp)))
-    tab += bodies + ['', 'const GuestFnEntry g_guest_fns[] = {'] + rows
-    tab.append('};')
-    tab.append('const unsigned g_guest_fn_count = %d;' % (len(funcs) + len(extra)))
-    tab.append('const unsigned g_guest_primary_count = %d;  /* entries before this index are Ghidra function starts */' % len(funcs))
     # code ranges with multi-entry variants: the runtime uses them for jumps into the middle of a function
     rr = []
+    for sp in sorted({f.space for f in img_fns}):
+        lo, hi = IMAGES[sp]
+        whole = Func(lo, False, sp + '_img', '')  # own cache key: 256 bytes of the image start
+        whole.ranges = [(lo, hi)]
+        ov = int(sp[2:])
+        rr.append('    {0x%08xu, 0x%08xu, 0x%08xu, %d, img_%s, %s},' % (lo, hi, lo, ov, sp, body_ref(whole, lo, ov)))
     for fn in multi_fns:
         sp = overlay_id(fn, fn.entry)
         ref = body_ref(fn, fn.entry, sp)
         for s0, e0 in fn.ranges:
             rr.append('    {0x%08xu, 0x%08xu, 0x%08xu, %d, %s_m, %s},' % (s0, e0, fn.entry, sp, fn.cname, ref))
+    tab += bodies + ['', 'const GuestFnEntry g_guest_fns[] = {'] + rows
+    tab.append('};')
+    tab.append('const unsigned g_guest_fn_count = %d;' % (len(funcs) + len(extra)))
+    tab.append('const unsigned g_guest_primary_count = %d;  /* entries before this index are Ghidra function starts */' % len(funcs))
     tab.append('const GuestRange g_guest_ranges[] = {')
     tab += rr or ['    {0, 0, 0, 0, 0, NULL, 0},']
     tab.append('};')

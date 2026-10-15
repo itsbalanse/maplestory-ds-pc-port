@@ -10,10 +10,10 @@ rebindable controls.
 * Boots natively and plays through the intro: opening movie, title, New Data, Minerva's quiz,
   name entry, signature, saving, and into the first stage (East Perion) with the tutorial
   dialogue, HUD, movement and combat. Screens match the reference emulator.
-* About 17,500 functions are recompiled (static ARM9, ITCM, all 107 overlays).
+* About 17,500 functions are recompiled (static ARM9, ITCM, all 107 overlays). The Mobiclip
+  movie decoder (hand-written ARM copied into ITCM) is emitted as a single C function over its
+  whole image, so its own calling conventions stay inside one C frame.
 * Run in the built-in interpreter instead of natively:
-  * the Mobiclip movie decoder (hand-written ARM copied into ITCM; its custom calling
-    conventions don't survive function-level recompilation yet), about 2.5× real time;
   * the anti-tamper overlay 107, which decrypts its own code at runtime;
   * any code the recompiler missed (logged to `recomp.log` as `no recompiled code at …`).
 * Save states (F5/F9) only work with `--interp`; the game's own save works in both modes.
@@ -42,3 +42,6 @@ Run `MapleStoryDS.exe` next to (or pointed at) `MapleStory DS (English).nds`.
 * `MSDS_DUMP_AT=fn:lr:n`: dump main RAM at the n-th call of a function (both modes).
 * `MSDS_INTERP_FN=lo-hi,…` (+ `MSDS_INTERP_OV=id`): run chosen recompiled functions in the
   interpreter, e.g. to bisect a recompiler bug with `tools/bisect_interp.py`.
+* `MSDS_ITRACE=file[:count]`: log every movie decoder instruction (pc, r0-r14, NZCV), in
+  `--interp` mode and from a native build configured with `-DMSDS_IMG_STEP=ON`; compare with
+  `tools/itracediff.py interp.itrace native.itrace` to find the first instruction that differs.

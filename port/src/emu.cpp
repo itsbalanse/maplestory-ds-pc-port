@@ -48,14 +48,14 @@ bool Emu::loadRom(const std::string& romPath, std::string& err) {
     useRecomp_ = recomp::available() && !forceInterpreter;
     NDSArgs args{};
     args.OutputSampleRate = kSampleRate;
-    if (useRecomp_ || getenv("MSDS_TRACE")) args.JIT = std::nullopt;  // ARM7 interpreted; ARM9 recompiled (or traced)
+    if (useRecomp_ || getenv("MSDS_TRACE") || getenv("MSDS_ITRACE")) args.JIT = std::nullopt;  // ARM7 interpreted; ARM9 recompiled (or traced)
     nds_ = std::make_unique<NDS>(std::move(args), this);
     nds_->Reset();
     nds_->SetNDSCart(std::move(cart));
     nds_->SetupDirectBoot(romPath);
     nds_->Start();
     if (useRecomp_) recomp::attach(nds_.get(), nds_->NDSCartSlot.GetCart()->GetHeader().ARM9EntryAddress);
-    if (const char* tp = getenv("MSDS_TRACE")) recomp::traceStart(tp, !useRecomp_);
+    if (getenv("MSDS_TRACE") || getenv("MSDS_ITRACE")) recomp::traceStart(getenv("MSDS_TRACE"), !useRecomp_);
     return true;
 }
 

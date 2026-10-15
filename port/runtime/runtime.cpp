@@ -197,10 +197,6 @@ GuestFn lookup(uint32_t addr) {
 void callExpect(uint32_t target, uint32_t expected);
 }  // namespace
 extern "C" { static bool forceInterp(uint32_t addr); static int residentOverlay(uint32_t addr); }
-// code images executed by the interpreter instead of recompiled code
-static bool interpretedImage(uint32_t addr) {
-    return addr >= 0x01ff8500u && addr < 0x01ffeae0u && residentOverlay(addr & ~1u) == 200;
-}
 static int g_interpOverlay = getenv("MSDS_INTERP_OV") ? atoi(getenv("MSDS_INTERP_OV")) : 200;  // debug: image to force-interpret
 namespace {
 
@@ -273,8 +269,7 @@ void interpretAt(uint32_t target) {
     for (;;) {
         uint32_t pc = g_arm9->R[15] - ((g_arm9->CPSR & 0x20) ? 2 : 4);
         if (rt_in_stack(&C, pc)) { C.ret = pc; break; }  // returned to a recompiled frame
-        if (lookup(pc) && pc != target && !interpretedImage(pc) &&
-            !(forceInterp(pc) && residentOverlay(pc) == g_interpOverlay)) {
+        if (lookup(pc) && pc != target && !(forceInterp(pc) && residentOverlay(pc) == g_interpOverlay)) {
             // calls back into recompiled code: run it natively, then resume interpreting at lr
             syncFromMelon();
             uint32_t back = C.r[14] & ~1u, thumb = C.r[14] & 1;
@@ -311,9 +306,6 @@ void callAt(uint32_t target) {
     target &= ~1u;
     g_stats.calls++;
     g_recentCalls[g_recentPos++ & 63] = target;
-    // The Mobiclip movie decoder (hand-written ARM copied into ITCM, pseudo-overlay 200) runs in the
-    // interpreter: its custom calling conventions don't survive the function-based recompilation yet.
-    if (interpretedImage(target)) { interpretAt(origTarget); return; }
     GuestFn fn = lookup(target);
     if (fn) { fn(&C); return; }
     // jump into the middle of hand-written assembly: use the owning function's multi-entry variant
@@ -770,8 +762,46 @@ void rt_watch(Cpu* c, uint32_t addr, uint32_t size, uint32_t val) {
 }
 }
 
+// debug: MSDS_ITRACE=file[:count] logs every instruction executed in the movie decoder image with
+// r0-r14 and NZCV, from the interpreter (--interp) and from native code built with -DMSDS_IMG_STEP=ON.
+// tools/itracediff.py finds the first instruction whose results differ.
+struct ImgRec { uint32_t pc, r[15], nzcv; };
+static FILE* g_itrace = nullptr;
+static uint64_t g_itraceLeft = 0;
+static const GuestRange* g_decoderRange = nullptr;
+
+static void itraceOpen() {
+    const char* e = getenv("MSDS_ITRACE");
+    if (!e || g_itrace) return;
+    std::string path = e;
+    g_itraceLeft = 4000000;
+    size_t colon = path.rfind(':');
+    if (colon != std::string::npos && colon > 1) {
+        g_itraceLeft = strtoull(path.c_str() + colon + 1, nullptr, 10);
+        path.resize(colon);
+    }
+    g_itrace = fopen(path.c_str(), "wb");
+    for (unsigned i = 0; i < g_guest_range_count; i++)
+        if (g_guest_ranges[i].overlay == 200) g_decoderRange = &g_guest_ranges[i];
+}
+
+static void itraceWrite(uint32_t pc, const uint32_t* r, uint32_t nzcv) {
+    if (!g_itrace || !g_itraceLeft) return;
+    ImgRec rec{pc, {}, nzcv};
+    memcpy(rec.r, r, sizeof rec.r);
+    fwrite(&rec, sizeof rec, 1, g_itrace);
+    if (--g_itraceLeft == 0) { fclose(g_itrace); g_itrace = nullptr; logf("[trace] instruction trace complete\n"); }
+}
+
+extern "C" void rt_img_step(Cpu* c, uint32_t addr) {
+    itraceWrite(addr, c->r, (uint32_t)c->NG << 3 | (uint32_t)c->ZR << 2 | (uint32_t)c->CY << 1 | c->OV);
+}
+
 static void interpHook(ARMv5* cpu, u32 addr) {
     if (!g_nds) g_nds = &cpu->NDS;
+    if (g_itrace && g_decoderRange && addr >= g_decoderRange->start && addr < g_decoderRange->end &&
+        memcmp(cpu->ITCM + (g_decoderRange->entry & (ITCMPhysicalSize - 1)), g_decoderRange->body, g_decoderRange->body_len) == 0)
+        itraceWrite(addr, cpu->R, cpu->CPSR >> 28);
     maybeDump(addr, cpu->R[14], "interp");
     // debug: MSDS_ITCM_AT=<addr> dumps ITCM the first time the interpreter reaches that address
     static uint32_t dumpAt = getenv("MSDS_ITCM_AT") ? (uint32_t)strtoul(getenv("MSDS_ITCM_AT"), nullptr, 16) : 0;
@@ -806,8 +836,9 @@ static void interpHook(ARMv5* cpu, u32 addr) {
 namespace recomp {
 
 void traceStart(const char* path, bool interpreter) {
-    g_traceFile = fopen(path, "wb");
-    if (!g_traceFile) return;
+    itraceOpen();
+    g_traceFile = path ? fopen(path, "wb") : nullptr;
+    if (!g_traceFile && !g_itrace) return;
     g_entryBitmap.assign((0x02200000u - 0x01FF8000u) / 2 / 8 + 1, 0);
     for (unsigned i = 0; i < g_guest_primary_count; i++) {
         uint32_t a = g_guest_fns[i].addr;
@@ -819,7 +850,7 @@ void traceStart(const char* path, bool interpreter) {
     if (g_fnmap.empty())
         for (unsigned i = 0; i < g_guest_fn_count; i++) g_fnmap[g_guest_fns[i].addr].e.push_back(&g_guest_fns[i]);
     if (interpreter) ARMv5::InstrHook = interpHook;
-    else g_rt_trace = 1;
+    else if (g_traceFile) g_rt_trace = 1;
 }
 
 void traceStop() {

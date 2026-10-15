@@ -25,6 +25,12 @@ if (GEN_SOURCES)
     add_library(game STATIC ${GEN_SOURCES} ${GEN_DIR}/table.c)
     target_include_directories(game PRIVATE runtime ${GEN_DIR})
     target_compile_options(game PRIVATE -O1 -fwrapv -fno-strict-aliasing -w)
+    # debug: per-instruction trace hook in code images emitted as one function (movie decoder),
+    # written to MSDS_ITRACE; compare with the interpreter using tools/itracediff.py
+    option(MSDS_IMG_STEP "Per-instruction trace hook in the movie decoder" OFF)
+    if (MSDS_IMG_STEP)
+        target_compile_definitions(game PRIVATE MSDS_IMG_STEP)
+    endif()
     message(STATUS "Recompiled game code: ${GEN_DIR}")
 else()
     add_library(game STATIC runtime/table_stub.c)
