@@ -8,6 +8,7 @@
 #include "Args.h"
 #include "Platform.h"
 #include "runtime.h"
+#include "testhooks.h"
 
 #include <cstdio>
 #include <cstring>
@@ -48,7 +49,7 @@ bool Emu::loadRom(const std::string& romPath, std::string& err) {
     useRecomp_ = recomp::available() && !forceInterpreter;
     NDSArgs args{};
     args.OutputSampleRate = kSampleRate;
-    if (useRecomp_ || getenv("MSDS_TRACE") || getenv("MSDS_ITRACE")) args.JIT = std::nullopt;  // ARM7 interpreted; ARM9 recompiled (or traced)
+    if (useRecomp_ || noJit || getenv("MSDS_TRACE") || getenv("MSDS_ITRACE")) args.JIT = std::nullopt;  // ARM7 interpreted; ARM9 recompiled (or traced)
     nds_ = std::make_unique<NDS>(std::move(args), this);
     nds_->Reset();
     nds_->SetNDSCart(std::move(cart));
@@ -56,6 +57,7 @@ bool Emu::loadRom(const std::string& romPath, std::string& err) {
     nds_->Start();
     if (useRecomp_) recomp::attach(nds_.get(), nds_->NDSCartSlot.GetCart()->GetHeader().ARM9EntryAddress);
     if (getenv("MSDS_TRACE") || getenv("MSDS_ITRACE")) recomp::traceStart(getenv("MSDS_TRACE"), !useRecomp_);
+    if (!useRecomp_ && noJit) recomp::enableInterpLua();  // test scripts: `lua` in reference mode
     return true;
 }
 
@@ -113,6 +115,15 @@ uint16_t Emu::masterBrightness(int screen) const {
     const bool aOnTop = nds_->PowerControl9 & 0x8000;
     const GPU2D::Unit& u = (screen == 0) == aOnTop ? nds_->GPU.GPU2D_A : nds_->GPU.GPU2D_B;
     return u.MasterBrightness;
+}
+
+bool Emu::dumpRam(const std::string& path) const {
+    if (!nds_) return false;
+    FILE* f = fopen(path.c_str(), "wb");
+    if (!f) return false;
+    fwrite(nds_->MainRAM, 1, 0x400000, f);
+    fclose(f);
+    return true;
 }
 
 bool Emu::dumpGpu(const std::string& path) const {

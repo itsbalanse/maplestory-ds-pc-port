@@ -49,6 +49,7 @@ add_executable(MapleStoryDS WIN32
     src/hudprompts.cpp
     runtime/runtime.cpp
     runtime/tagprompts.cpp
+    runtime/testhooks.cpp
 )
 target_include_directories(MapleStoryDS PRIVATE src runtime ${MELONDS_DIR}/src)
 target_link_libraries(MapleStoryDS PRIVATE game core SDL2::SDL2 comdlg32 gdi32)

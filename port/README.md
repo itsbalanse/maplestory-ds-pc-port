@@ -62,8 +62,18 @@ Run `MapleStoryDS.exe` next to (or pointed at) `MapleStory DS (English).nds`.
   `rawshot NAME` saves the frame without the PC button prompts (for cutting icon templates).
   `gpudump NAME` writes both 2D engines' VRAM, palettes, OAM and registers; decode with
   `tools/gpudump.py NAME.gpu OUTDIR [x0 y0 x1 y1 screen]` (renders layers, lists what covers a rectangle).
+  `lua CODE` runs Lua in the game through its own script engine between frames (native and, with the
+  pure interpreter, `--interp`), e.g. `lua ChangeStage('MP030101')` to warp; `luawait [N]` fails if the
+  game stops running its frame loop; `ramdump NAME` writes main RAM.
+* `tools/stage_sweep.py SAVE OUTDIR [--interp] [--from-results OLD/results.json]`: whole-game test.
+  Warps to every stage for every class that has scripts there (808 runs), plays a little, and flags
+  crashes, hangs, black screens and code the recompiler missed; `--interp` runs the same in the
+  reference interpreter to tell port bugs from the game's own behaviour.
+* `tools/find_switch_tables.py`: Thumb switch tables whose case blocks Ghidra did not disassemble
+  (fed to `SeedSwitchTargets.java` by `import.sh`; should report 0 missing).
+* `MSDS_INTERP_LOG=addr:n`: log the first n instructions of an interpreter fallback starting at addr.
 * `MSDS_TRACE=file`: log every function entry (both modes); compare with
-  `tools/tracediff.py interp.trace recomp.trace [--from ADDR:LR] [--strict]`.
+  `tools/tracediff.py interp.trace recomp.trace [--from ADDR:LR] [--strict] [--keys addr,lr]`.
 * `MSDS_WATCH=addr[:len]`: log writes to guest memory with the current function and call stack.
 * `MSDS_DUMP_AT=fn:lr:n`: dump main RAM at the n-th call of a function (both modes).
 * `MSDS_INTERP_FN=lo-hi,…` (+ `MSDS_INTERP_OV=id`): run chosen recompiled functions in the

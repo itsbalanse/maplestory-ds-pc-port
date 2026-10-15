@@ -12,6 +12,7 @@ public:
     static inline bool verbose = false;
     static inline std::string savOverride;            // save file path override (tests)
     static inline bool forceInterpreter = false;  // --interp: run ARM9 in the melonDS interpreter
+    static inline bool noJit = false;             // pure interpreter (test hooks in --interp mode)
 
     Emu();
     ~Emu();
@@ -33,6 +34,7 @@ public:
 
     // Debug: write both 2D engines' VRAM views, palettes, OAM and registers (tools/gpudump.py)
     bool dumpGpu(const std::string& path) const;
+    bool dumpRam(const std::string& path) const;  // main RAM, 4 MB
     // MASTER_BRIGHT register of the engine shown on screen 0 (top) / 1 (bottom)
     uint16_t masterBrightness(int screen) const;
 

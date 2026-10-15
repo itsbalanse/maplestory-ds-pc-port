@@ -16,10 +16,15 @@ bool TestScript::load(const std::string& path) {
     std::string line;
     while (std::getline(f, line)) {
         auto h = line.find('#');
-        if (h != std::string::npos) line = line.substr(0, h);
+        if (h != std::string::npos && line.rfind("lua ", 0) != 0) line = line.substr(0, h);  // Lua may use '#'
         std::istringstream ss(line);
         Cmd c;
         if (!(ss >> c.op)) continue;
+        {
+            auto p = line.find(c.op) + c.op.size();
+            c.rest = line.substr(std::min(p + 1, line.size()));
+            while (!c.rest.empty() && (c.rest.back() == '\r' || c.rest.back() == ' ')) c.rest.pop_back();
+        }
         std::string a;
         while (ss >> a) c.args.push_back(a);
         cmds_.push_back(c);
@@ -56,7 +61,18 @@ void TestScript::frame(uint32_t& keyMask, bool& touching, int& tx, int& ty, std:
             pulseLeft_ = 6;
         }
     }
-    if (waitingPixel_ && pulseLeft_ == 0 && releaseLeft_ == 0) {
+    if (luaWaitLeft_ > 0) {
+        if (!luaPending || !luaPending()) {
+            luaWaitLeft_ = 0;
+        } else if (--luaWaitLeft_ == 0) {
+            failed_ = true;
+            fprintf(stderr, "test script: queued Lua did not run (the game left its frame loop: hang or long movie)\n");
+            pc_ = cmds_.size();
+        }
+    }
+    if (luaWaitLeft_ > 0) {
+        // keep waiting
+    } else if (waitingPixel_ && pulseLeft_ == 0 && releaseLeft_ == 0) {
         // keep waiting
     } else if (pulseLeft_ > 0) {
         if (--pulseLeft_ == 0) { pulse_ = 0; releaseLeft_ = 6; }
@@ -81,6 +97,9 @@ void TestScript::frame(uint32_t& keyMask, bool& touching, int& tx, int& ty, std:
             if (c.op == "touchdown") { tx_ = arg(0, 0); ty_ = arg(1, 0); touching_ = true; continue; }
             if (c.op == "touchup") { touching_ = false; continue; }
             if (c.op == "rawshot" && !c.args.empty()) { shots.push_back("raw:" + c.args[0]); continue; }
+            if (c.op == "lua" && !c.rest.empty()) { shots.push_back("lua:" + c.rest); continue; }
+            if (c.op == "luawait") { luaWaitLeft_ = arg(0, 1800); break; }
+            if (c.op == "ramdump" && !c.args.empty()) { shots.push_back("ram:" + c.args[0]); continue; }
             if ((c.op == "until" && c.args.size() >= 3) || (c.op == "pressuntil" && c.args.size() >= 4)) {
                 size_t o = c.op == "until" ? 0 : 1;
                 pKey_ = o ? keyBit(c.args[0]) : 0;

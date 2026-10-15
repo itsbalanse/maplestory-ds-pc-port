@@ -16,4 +16,11 @@ MSDS_SEEDS="$W/seeds_manual.txt" "$GH" "$W/ghidra_full" msfull -process arm9_dec
 "$GH" "$W/ghidra_full" msfull -process arm9_dec.bin -noanalysis -scriptPath "$S" -postScript SeedOverlayPointers.java > "$W/seed_ovptr.log" 2>&1
 MSDS_EXTRA_ENTRIES="$W/extra_entries.txt" "$GH" "$W/ghidra_full" msfull -process arm9_dec.bin -noanalysis -scriptPath "$S" \
     -postScript SeedStatic.java > "$W/seed_static.log" 2>&1
-grep -h -E "seeded|orphan|functions now" "$W/seed_overlays.log" "$W/seed_static.log"
+# Thumb switch tables Ghidra did not recover (their case blocks would be missing from the C):
+# needs a P-code export to know what is decoded, then seed the targets and export again (regen.sh)
+PCODE_OUT="$W/pcode_full.txt" "$GH" "$W/ghidra_full" msfull -process arm9_dec.bin -noanalysis -readOnly \
+    -scriptPath "$S" -postScript ExportPcode.java > "$W/export.log" 2>&1
+python "$ROOT/tools/find_switch_tables.py" --out "$W/switch_seeds.txt"
+MSDS_SWITCH="$W/switch_seeds.txt" "$GH" "$W/ghidra_full" msfull -process arm9_dec.bin -noanalysis -scriptPath "$S" \
+    -postScript SeedSwitchTargets.java > "$W/seed_switch.log" 2>&1
+grep -h -E "seeded|orphan|functions now|switch targets" "$W/seed_overlays.log" "$W/seed_static.log" "$W/seed_switch.log"

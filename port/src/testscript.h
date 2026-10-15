@@ -2,6 +2,10 @@
 //   wait N | press KEY [N] | hold KEY | release KEY | touch X Y [N] | shot NAME
 //   touchdown X Y | touchup                 touch and hold until touchup (shots can be taken meanwhile)
 //   rawshot NAME                           like shot, without the PC button prompts (the game's own icons)
+//   lua CODE                               run Lua in the game (native build), e.g. lua ChangeStage('MP030101')
+//   ramdump NAME                           write main RAM (4 MB) to NAME.ram
+//   luawait [TIMEOUT]                      wait until queued Lua has run; fails if the game never
+//                                          reaches its frame loop in time (hang, default 1800 frames)
 //   until X Y RRGGBB [TIMEOUT]             wait until the pixel (X, Y on the 256x384 stack) has that colour
 //   pressuntil KEY X Y RRGGBB [TIMEOUT]    press KEY every 40 frames until that pixel colour shows
 // KEY: A B SELECT START RIGHT LEFT UP DOWN R L X Y
@@ -18,11 +22,12 @@ public:
     // names of screenshots to take after this frame. done() becomes true when the script ends.
     void frame(uint32_t& keyMask, bool& touching, int& tx, int& ty, std::vector<std::string>& shots);
     std::function<uint32_t(int, int)> pixel;  // reads the current frame (0x00RRGGBB)
+    std::function<bool()> luaPending;          // Lua queued but not yet run
     bool failed() const { return failed_; }
-    bool done() const { return pc_ >= cmds_.size() && wait_ == 0 && !waitingPixel_ && pulseLeft_ == 0 && touchLeft_ == 0; }
+    bool done() const { return pc_ >= cmds_.size() && wait_ == 0 && !waitingPixel_ && pulseLeft_ == 0 && touchLeft_ == 0 && !luaWaitLeft_; }
 
 private:
-    struct Cmd { std::string op; std::vector<std::string> args; };
+    struct Cmd { std::string op; std::vector<std::string> args; std::string rest; };  // rest: text after op
     std::vector<Cmd> cmds_;
     size_t pc_ = 0;
     int wait_ = 0;
@@ -33,6 +38,7 @@ private:
     int tx_ = 0, ty_ = 0, touchLeft_ = 0;
     // until / pressuntil
     bool waitingPixel_ = false, failed_ = false;
+    int luaWaitLeft_ = 0;
     int px_ = 0, py_ = 0, pTimeout_ = 0, pTimer_ = 0;
     uint32_t pColor_ = 0, pKey_ = 0;
 };

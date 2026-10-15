@@ -88,6 +88,7 @@ def parse(path):
 OVERRIDES = {
     0x020c3af8: 'ovr_OS_SaveContext',
     0x020c3b44: 'ovr_OS_LoadContext',
+    0x020c4f74: 'ovr_WaitVBlankIntr',  # test hooks: run queued Lua between frames (runtime/testhooks.cpp)
     0x02017a70: 'ovr_ExpandTags',      # button prompts for the player's bindings (runtime/tagprompts.cpp)
 }
 
@@ -131,6 +132,7 @@ def overlay_id(fn, addr):
 
 class Emitter:
     def __init__(self, regs, userops, funcs):
+        self.ambiguous = set()  # (space, entry) of overlay functions shared byte-for-byte (see main)
         self.regs, self.userops = regs, userops
         self.funcs = funcs
         self.by_space = collections.defaultdict(dict)
@@ -593,6 +595,10 @@ class Emitter:
         if t is not None and t.space == 'ram' and in_itcm_overlay(addr) and image_of(fn) != 'itcm0':
             # ITCM above 0x01ff8500 is swapped at runtime (overlay 0 / movie decoder): dispatch
             return 'rt_call(c, 0x%08xu | c->TB);' % addr
+        if t is not None and t.space == fn.space and t.space != 'ram' and (fn.space, fn.entry) in self.ambiguous:
+            # this function's code is byte-identical in several overlays, so it may be running on
+            # behalf of another overlay than its own: let the dispatcher find the resident callee
+            return 'rt_call(c, 0x%08xu | c->TB);' % addr
         if t is not None and (t.space == 'ram' or t.space == fn.space):
             return '%s(c);' % t.cname
         return 'rt_call(c, 0x%08xu | c->TB);' % addr
@@ -815,6 +821,26 @@ def main():
     os.makedirs(outdir, exist_ok=True)
     open(os.path.join(outdir, 'merged_entries.txt'), 'w').write(''.join('%08x\n' % e for e in merged_entries))
     em = Emitter(regs, userops, funcs)
+    # Overlay functions whose code is byte-identical in another overlay at the same address: the
+    # dispatcher may pick either copy, so their calls within the overlay must be dispatched too.
+    ov_images = {}
+    ovdir = sys.argv[sys.argv.index('--overlay-dir') + 1] if '--overlay-dir' in sys.argv else None
+    if ovdir:
+        for fname in os.listdir(ovdir):
+            if fname.startswith('ov') and fname.endswith('.bin'):
+                ov_images[int(fname[2:5])] = (int(fname[6:14], 16), open(os.path.join(ovdir, fname), 'rb').read())
+
+    def fn_body(fn, start, sp):
+        base, img = ov_images[sp]
+        end = max([e0 for s0, e0 in fn.ranges if e0 > start] or [start])
+        return img[start - base:end - base]
+    same_code = collections.defaultdict(list)
+    for f in funcs:
+        sp = overlay_id(f, f.entry)
+        if f.space != 'ram' and sp >= 0 and sp in ov_images:
+            same_code[(f.entry, fn_body(f, f.entry, sp))].append(f)
+    em.ambiguous = {(f.space, f.entry) for group in same_code.values() if len(group) > 1 for f in group}
+    print('overlay functions shared byte-for-byte by several overlays: %d' % len(em.ambiguous))
     extra = []  # (containing function, address)
     if '--extra-entries' in sys.argv:
         path = sys.argv[sys.argv.index('--extra-entries') + 1]
@@ -926,14 +952,8 @@ def main():
         open(os.path.join(outdir, 'funcs_%03d.c' % nfiles), 'w').write('\n'.join(body))
         nfiles += 1
     # dispatch table: (space, address, thumb, fn)
-    # Overlays share load addresses and often start with identical prologues, so overlay entries
-    # carry up to 256 bytes of the function's original code; the dispatcher compares them with RAM.
-    ov_images = {}
-    ovdir = sys.argv[sys.argv.index('--overlay-dir') + 1] if '--overlay-dir' in sys.argv else None
-    if ovdir:
-        for fname in os.listdir(ovdir):
-            if fname.startswith('ov') and fname.endswith('.bin'):
-                ov_images[int(fname[2:5])] = (int(fname[6:14], 16), open(os.path.join(ovdir, fname), 'rb').read())
+    # Overlays share load addresses and often start with identical code, so overlay entries carry
+    # the function's original code; the dispatcher compares it with RAM to find the resident one.
     bodies = []
     body_names = {}
 
@@ -943,11 +963,10 @@ def main():
         if sp < 0 or sp not in ov_images:
             return 'NULL, 0'
         base, img = ov_images[sp]
-        end = start
-        for s0, e0 in fn.ranges:
-            if s0 <= start < e0:
-                end = e0
-        end = min(end, start + 256)
+        # The whole function, not a prefix: overlays loaded at the same address can share long
+        # identical stretches of code (ov073 and ov096 agree on the first 256+ bytes of a function
+        # and differ later), and dispatching the wrong one crashes the game (Guard training stage).
+        end = max([e0 for s0, e0 in fn.ranges if e0 > start] or [start])
         data = img[start - base:end - base]
         if not data:
             return 'NULL, 0'

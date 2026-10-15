@@ -1,6 +1,6 @@
 """Compare function-entry traces from the interpreter and the recompiled build.
 
-usage: python tools/tracediff.py interp.trace recomp.trace [--limit N] [--hunks K]
+usage: python tools/tracediff.py interp.trace recomp.trace [--limit N] [--hunks K] [--keys addr,lr]
 
 Records: addr, r0..r3, sp, lr, cpu mode (8 x u32). IRQ-mode records are ignored because
 interrupts land at different points in the two runs, and short polling loops are collapsed.
@@ -14,6 +14,11 @@ import numpy as np
 DT = np.dtype([('addr', '<u4'), ('r0', '<u4'), ('r1', '<u4'), ('r2', '<u4'), ('r3', '<u4'),
                ('sp', '<u4'), ('lr', '<u4'), ('mode', '<u4')])
 FIELDS = ('addr', 'r0', 'r1', 'r2', 'r3', 'sp', 'lr')
+KEYS = list(range(len(FIELDS)))  # fields compared (--keys addr,lr: control flow only)
+
+
+def key(r):
+    return tuple(r[k] for k in KEYS)
 
 
 def collapse_loops(keys, maxlen=6):
@@ -52,7 +57,7 @@ def load(path, limit):
     rows = [tuple(int(r[k]) for k in FIELDS) for r in t]
     # magic runtime addresses (>= 0xF0000000) stand in for BIOS/thread addresses: normalise
     rows = [tuple(0xF0000000 if v >= 0xF0000000 else v for v in r) for r in rows]
-    keep = collapse_loops(rows)
+    keep = collapse_loops([key(r) for r in rows])
     return [rows[i] for i in keep]
 
 
@@ -68,7 +73,7 @@ def resync(a, b, i, j, window=400, need=4):
             ii, jj = i + di, j + dj
             if ii + need > len(a) or jj + need > len(b):
                 continue
-            if all(a[ii + k] == b[jj + k] for k in range(need)):
+            if all(key(a[ii + k]) == key(b[jj + k]) for k in range(need)):
                 return ii, jj
     return best
 
@@ -78,7 +83,9 @@ STRICT = False
 
 
 def main():
-    global START, STRICT
+    global START, STRICT, KEYS
+    if '--keys' in sys.argv:  # e.g. --keys addr,lr when arguments legitimately differ (test hooks)
+        KEYS = [FIELDS.index(k) for k in sys.argv[sys.argv.index('--keys') + 1].split(',')]
     STRICT = '--strict' in sys.argv  # also report the first hunk that differs only in arguments
     if '--from' in sys.argv:  # --from ADDR:LR  start both traces at the first call of ADDR from LR
         f, l = sys.argv[sys.argv.index('--from') + 1].split(':')
@@ -91,7 +98,7 @@ def main():
     timing_hunks = 0
     shown = 0
     while i < len(a) and j < len(b):
-        if a[i] == b[j]:
+        if key(a[i]) == key(b[j]):
             i += 1; j += 1
             continue
         r = resync(a, b, i, j)

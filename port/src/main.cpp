@@ -20,6 +20,7 @@
 #include "ui.h"
 #include "prompts.h"
 #include "hudprompts.h"
+#include "testhooks.h"
 #include "runtime.h"
 #include "testscript.h"
 
@@ -195,6 +196,8 @@ int main(int argc, char** argv) {
         printf("%d icons redrawn\n", n);
         return 0;
     }
+    // reference-mode test scripts may run Lua through an instruction hook: needs the pure interpreter
+    if (Emu::forceInterpreter && !testScriptPath.empty()) Emu::noJit = true;
     if (cfg.rom.empty() || !fs::exists(fs::u8path(cfg.rom))) cfg.rom = findRom(base);
     if (cfg.rom.empty()) cfg.rom = pickRomDialog();
     if (cfg.rom.empty()) return 0;
@@ -218,6 +221,7 @@ int main(int argc, char** argv) {
         return 1;
     }
     const bool headless = testFrames > 0 || !testScriptPath.empty();
+    script.luaPending = [] { return recomp::luaPending(); };
     script.pixel = [&emu](int x, int y) -> uint32_t {
         if (x < 0 || x > 255 || y < 0 || y > 383) return 0;
         const uint32_t* scr = emu.screen(y >= 192 ? 1 : 0);
@@ -371,6 +375,8 @@ int main(int argc, char** argv) {
                 if (!shots.empty()) compose();
                 for (auto& name : shots) {
                     if (name.rfind("gpu:", 0) == 0) { emu.dumpGpu(name.substr(4) + ".gpu"); continue; }
+                    if (name.rfind("lua:", 0) == 0) { recomp::queueLua(name.substr(4)); continue; }
+                    if (name.rfind("ram:", 0) == 0) { emu.dumpRam(name.substr(4) + ".ram"); continue; }
                     if (name.rfind("raw:", 0) == 0) {  // the game's own frame, DS icons not redrawn
                         for (int i = 0; i < 2; i++)
                             if (const uint32_t* px = emu.screen(i)) memcpy(frame[i].data(), px, 256 * 192 * 4);

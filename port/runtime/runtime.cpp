@@ -278,6 +278,14 @@ void interpretAt(uint32_t target) {
             g_arm9->JumpTo(back | thumb);
             continue;
         }
+        // debug: MSDS_INTERP_LOG=<addr>:<n> logs n instructions of a fallback that starts at addr
+        static uint32_t dbgAt = getenv("MSDS_INTERP_LOG") ? (uint32_t)strtoul(getenv("MSDS_INTERP_LOG"), nullptr, 16) : 0;
+        static int dbgLeft = getenv("MSDS_INTERP_LOG") && strchr(getenv("MSDS_INTERP_LOG"), ':') ? atoi(strchr(getenv("MSDS_INTERP_LOG"), ':') + 1) : 0;
+        if (dbgLeft > 0 && (target & ~1u) == dbgAt) {
+            dbgLeft--;
+            logf("[interp] pc=%08x cpsr=%08x r0=%08x r1=%08x r2=%08x r3=%08x r4=%08x sp=%08x lr=%08x\n", pc,
+                 g_arm9->CPSR, g_arm9->R[0], g_arm9->R[1], g_arm9->R[2], g_arm9->R[3], g_arm9->R[4], g_arm9->R[13], g_arm9->R[14]);
+        }
         stepInterpreter(g_arm9);
         g_interpSteps++;
         if (g_arm9->Halted == 1) {  // wait for interrupt inside interpreted code
@@ -302,6 +310,9 @@ void interpretAt(uint32_t target) {
 }
 
 void callAt(uint32_t target) {
+    // computed jumps (bx/pop pc) pass the target with bit 0 cleared and the instruction set in TB:
+    // keep it, or interpreted fallbacks would run Thumb code as ARM (undefined instruction -> hang)
+    if (!(target & 1) && C.TB) target |= 1;
     uint32_t origTarget = target;
     target &= ~1u;
     g_stats.calls++;
