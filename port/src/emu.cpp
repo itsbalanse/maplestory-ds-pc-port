@@ -7,6 +7,7 @@
 #include "Savestate.h"
 #include "Args.h"
 #include "Platform.h"
+#include "runtime.h"
 
 #include <cstdio>
 #include <cstring>
@@ -43,13 +44,17 @@ bool Emu::loadRom(const std::string& romPath, std::string& err) {
     auto cart = NDSCart::ParseROM(std::move(romdata), (u32)rom.size(), this, std::move(cargs));
     if (!cart) { err = "Not a valid DS ROM: " + romPath; return false; }
 
+    useRecomp_ = recomp::available() && !forceInterpreter;
     NDSArgs args{};
     args.OutputSampleRate = kSampleRate;
+    if (useRecomp_ || getenv("MSDS_TRACE")) args.JIT = std::nullopt;  // ARM7 interpreted; ARM9 recompiled (or traced)
     nds_ = std::make_unique<NDS>(std::move(args), this);
     nds_->Reset();
     nds_->SetNDSCart(std::move(cart));
     nds_->SetupDirectBoot(romPath);
     nds_->Start();
+    if (useRecomp_) recomp::attach(nds_.get(), nds_->NDSCartSlot.GetCart()->GetHeader().ARM9EntryAddress);
+    if (const char* tp = getenv("MSDS_TRACE")) recomp::traceStart(tp, !useRecomp_);
     return true;
 }
 
@@ -58,6 +63,7 @@ void Emu::reset() {
     nds_->Reset();
     nds_->SetupDirectBoot(romPath_);
     nds_->Start();
+    if (useRecomp_) recomp::attach(nds_.get(), nds_->NDSCartSlot.GetCart()->GetHeader().ARM9EntryAddress);
 }
 
 void Emu::runFrame(uint32_t keyMask, bool touching, int tx, int ty) {
@@ -82,7 +88,7 @@ int Emu::readAudio(int16_t* out, int maxFrames) {
 }
 
 bool Emu::saveState(const std::string& path) {
-    if (!nds_) return false;
+    if (!nds_ || useRecomp_) return false;  // recompiled code keeps state on the host stack
     Savestate st;
     if (!nds_->DoSavestate(&st) || st.Error) return false;
     FILE* f = fopen(path.c_str(), "wb");
@@ -93,7 +99,7 @@ bool Emu::saveState(const std::string& path) {
 }
 
 bool Emu::loadState(const std::string& path) {
-    if (!nds_) return false;
+    if (!nds_ || useRecomp_) return false;
     auto b = readFile(path);
     if (b.empty()) return false;
     Savestate st(b.data(), (u32)b.size(), false);

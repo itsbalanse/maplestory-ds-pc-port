@@ -18,7 +18,7 @@ enum class Act {
     Skill1, Skill2, Skill3, Skill4, Skill5, Skill6,
     Talk, Menu, Confirm, Cancel, Select,
     // frontend actions
-    KeybindEditor, Fullscreen, NextLayout, QuickSave, QuickLoad, FastForward, Pause, Screenshot,
+    KeybindEditor, Fullscreen, NextLayout, QuickSave, QuickLoad, FastForward, Pause, Screenshot, Mute,
     Count
 };
 

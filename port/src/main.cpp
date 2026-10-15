@@ -18,6 +18,7 @@
 #include "emu.h"
 #include "input.h"
 #include "ui.h"
+#include "runtime.h"
 
 namespace fs = std::filesystem;
 
@@ -28,6 +29,7 @@ struct Settings {
     bool integerScale = false;
     bool smooth = false;
     bool fullscreen = false;
+    bool mute = false;
     int winW = 768, winH = 1152;
 
     void load(const std::string& p) {
@@ -45,6 +47,7 @@ struct Settings {
             else if (k == "integer_scale") integerScale = v == "1";
             else if (k == "smooth") smooth = v == "1";
             else if (k == "fullscreen") fullscreen = v == "1";
+            else if (k == "mute") mute = v == "1";
             else if (k == "window_width") winW = std::max(256, std::atoi(v.c_str()));
             else if (k == "window_height") winH = std::max(192, std::atoi(v.c_str()));
         }
@@ -57,6 +60,7 @@ struct Settings {
           << "integer_scale = " << integerScale << "\n"
           << "smooth = " << smooth << "\n"
           << "fullscreen = " << fullscreen << "\n"
+          << "mute = " << mute << "\n"
           << "window_width = " << winW << "\n"
           << "window_height = " << winH << "\n";
     }
@@ -144,9 +148,11 @@ int main(int argc, char** argv) {
     for (int i = 1; i < argc; i++) {
         std::string a = argv[i];
         if (a == "--verbose") Emu::verbose = true;
+        else if (a == "--interp") Emu::forceInterpreter = true;
         else if (a == "--test-frames" && i + 1 < argc) testFrames = std::atoi(argv[++i]);
         else if (a == "--test-shot" && i + 1 < argc) testShot = argv[++i];
         else if (a == "--test-editor") testEditor = true;
+        else if (a == "--mute") cfg.mute = true;
         else cfg.rom = a;
     }
     if (cfg.rom.empty() || !fs::exists(fs::u8path(cfg.rom))) cfg.rom = findRom(base);
@@ -160,9 +166,13 @@ int main(int argc, char** argv) {
         return 1;
     }
 
+    // Self-tests run in the background: hidden window, no sound, no frame pacing.
+    const bool headless = testFrames > 0;
     SDL_Window* win = SDL_CreateWindow("MapleStory DS", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
-                                       cfg.winW, cfg.winH, SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI);
-    SDL_Renderer* ren = SDL_CreateRenderer(win, -1, SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
+                                       cfg.winW, cfg.winH,
+                                       SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI | (headless ? SDL_WINDOW_HIDDEN : 0));
+    SDL_Renderer* ren = headless ? SDL_CreateRenderer(win, -1, SDL_RENDERER_SOFTWARE)
+                                 : SDL_CreateRenderer(win, -1, SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
     if (!ren) ren = SDL_CreateRenderer(win, -1, 0);
     if (cfg.fullscreen) SDL_SetWindowFullscreen(win, SDL_WINDOW_FULLSCREEN_DESKTOP);
     SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY, cfg.smooth ? "linear" : "nearest");
@@ -174,7 +184,7 @@ int main(int argc, char** argv) {
     want.format = AUDIO_S16SYS;
     want.channels = 2;
     want.samples = 1024;
-    SDL_AudioDeviceID audio = SDL_OpenAudioDevice(nullptr, 0, &want, &have, 0);
+    SDL_AudioDeviceID audio = headless ? 0 : SDL_OpenAudioDevice(nullptr, 0, &want, &have, 0);
     if (audio) SDL_PauseAudioDevice(audio, 0);
 
     Overlay ui(ren, input, bindPath);
@@ -196,6 +206,8 @@ int main(int argc, char** argv) {
     int frameNo = 0;
     while (running) {
         if (testFrames && ++frameNo > testFrames) {
+            if (recomp::active()) recomp::dumpStats();
+            recomp::traceStop();
             if (!testShot.empty()) {
                 int rw, rh;
                 SDL_GetRendererOutputSize(ren, &rw, &rh);
@@ -247,9 +259,16 @@ int main(int argc, char** argv) {
                 SDL_SetWindowFullscreen(win, cfg.fullscreen ? SDL_WINDOW_FULLSCREEN_DESKTOP : 0);
             }
             if (input.pressed(Act::NextLayout)) { cfg.layout = (cfg.layout + 1) % 3; ui.toast(kLayoutNames[cfg.layout]); }
+            if (input.pressed(Act::Mute)) {
+                cfg.mute = !cfg.mute;
+                if (cfg.mute && audio) SDL_ClearQueuedAudio(audio);
+                ui.toast(cfg.mute ? "Sound muted (F3)" : "Sound on (F3)");
+            }
             if (input.pressed(Act::Pause)) { paused = !paused; ui.toast(paused ? "Paused" : "Resumed"); }
-            if (input.pressed(Act::QuickSave)) ui.toast(emu.saveState(statePath) ? "State saved" : "Could not save state");
-            if (input.pressed(Act::QuickLoad)) ui.toast(emu.loadState(statePath) ? "State loaded" : "No saved state");
+            if (input.pressed(Act::QuickSave))
+                ui.toast(emu.recompiled() ? "Save states need --interp mode (use the in-game save)" : emu.saveState(statePath) ? "State saved" : "Could not save state");
+            if (input.pressed(Act::QuickLoad))
+                ui.toast(emu.recompiled() ? "Save states need --interp mode (use the in-game save)" : emu.loadState(statePath) ? "State loaded" : "No saved state");
             if (input.pressed(Act::Screenshot)) {
                 SDL_Surface* s = SDL_CreateRGBSurfaceWithFormat(0, 256, 384, 32, SDL_PIXELFORMAT_ARGB8888);
                 memcpy(s->pixels, emu.screen(0), 256 * 192 * 4);
@@ -271,7 +290,7 @@ int main(int argc, char** argv) {
             for (int i = 0; i < frames; i++) emu.runFrame(mask, touching, tx, ty);
             int n;
             while ((n = emu.readAudio(abuf.data(), (int)abuf.size() / 2)) > 0) {
-                if (audio && !ff && SDL_GetQueuedAudioSize(audio) < (Uint32)frameBytes * 6)
+                if (audio && !ff && !cfg.mute && SDL_GetQueuedAudioSize(audio) < (Uint32)frameBytes * 6)
                     SDL_QueueAudio(audio, abuf.data(), n * 4);
             }
         }
@@ -301,8 +320,8 @@ int main(int argc, char** argv) {
         SDL_RenderPresent(ren);
 
         // pacing: audio queue depth when available, otherwise wall clock
-        if (!ff) {
-            if (audio && !paused && !ui.editorOpen()) {
+        if (!ff && !headless) {
+            if (audio && !cfg.mute && !paused && !ui.editorOpen()) {
                 while (SDL_GetQueuedAudioSize(audio) > (Uint32)frameBytes * 3) SDL_Delay(1);
             } else {
                 next += (Uint64)(frameSec * freq);

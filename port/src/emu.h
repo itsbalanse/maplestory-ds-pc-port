@@ -10,6 +10,7 @@ namespace melonDS { class NDS; }
 class Emu {
 public:
     static inline bool verbose = false;
+    static inline bool forceInterpreter = false;  // --interp: run ARM9 in the melonDS interpreter
 
     Emu();
     ~Emu();
@@ -34,9 +35,11 @@ public:
 
     const std::string& romPath() const { return romPath_; }
     bool loaded() const { return nds_ != nullptr; }
+    bool recompiled() const { return useRecomp_; }
 
 private:
     std::unique_ptr<melonDS::NDS> nds_;
+    bool useRecomp_ = false;
     std::string romPath_, savPath_;
     std::vector<uint8_t> pendingSave_;
     bool saveDirty_ = false;

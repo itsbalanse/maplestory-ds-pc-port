@@ -1,0 +1,49 @@
+diff --git a/src/ARM.cpp b/src/ARM.cpp
+index 827fcb0..9b75eba 100644
+--- a/src/ARM.cpp
++++ b/src/ARM.cpp
+@@ -592,6 +592,12 @@ void ARM::CheckGdbIncoming()
+ template <CPUExecuteMode mode>
+ void ARMv5::Execute()
+ {
++    if (ExternalExecute)
++    {
++        ExternalExecute(this);
++        return;
++    }
++
+     if constexpr (mode == CPUExecuteMode::InterpreterGDB)
+         GdbCheckB();
+ 
+@@ -661,6 +667,7 @@ void ARMv5::Execute()
+             {
+                 if constexpr (mode == CPUExecuteMode::InterpreterGDB)
+                     GdbCheckC();
++                if (InstrHook) InstrHook(this, R[15] - 2);
+ 
+                 // prefetch
+                 R[15] += 2;
+@@ -677,6 +684,7 @@ void ARMv5::Execute()
+             {
+                 if constexpr (mode == CPUExecuteMode::InterpreterGDB)
+                     GdbCheckC();
++                if (InstrHook) InstrHook(this, R[15] - 4);
+ 
+                 // prefetch
+                 R[15] += 4;
+diff --git a/src/ARM.h b/src/ARM.h
+index 96ed66f..acaa45f 100644
+--- a/src/ARM.h
++++ b/src/ARM.h
+@@ -232,6 +232,11 @@ protected:
+ class ARMv5 : public ARM
+ {
+ public:
++    // PC port: when set, ARM9 execution is delegated to recompiled code instead of the interpreter.
++    static inline void (*ExternalExecute)(ARMv5* cpu) = nullptr;
++    // PC port: called with the address of each instruction the interpreter executes (tracing).
++    static inline void (*InstrHook)(ARMv5* cpu, u32 addr) = nullptr;
++
+     ARMv5(melonDS::NDS& nds, std::optional<GDBArgs> gdb, bool jit);
+     ~ARMv5();
+ 

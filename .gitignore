@@ -8,3 +8,4 @@ thirdparty/
 tools/dsharness/*.exe
 __pycache__/
 *.pyc
+port/recomp/__pycache__/

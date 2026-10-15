@@ -264,6 +264,10 @@ int main(int argc, char** argv) {
             for (u32 i = 0; i < len; i++) buf[i] = nds->ARM9Read8(addr + i);
             FILE* f = fopen(fn.c_str(), "wb"); fwrite(buf.data(), 1, len, f); fclose(f);
         }
+        else if (cmd == "itcm") {  // itcm FILE: dump the ARM9's 32 KB ITCM (not visible on the bus)
+            std::string fn; ss >> fn;
+            FILE* f = fopen(fn.c_str(), "wb"); fwrite(nds->ARM9.ITCM, 1, ITCMPhysicalSize, f); fclose(f);
+        }
         else fprintf(stderr, "unknown command %s\n", cmd.c_str());
     }
     printf("done, %llu frames\n", (unsigned long long)frame);

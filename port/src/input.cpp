@@ -34,6 +34,7 @@ static const ActionInfo kActions[(int)Act::Count] = {
     {"FastForward", "Fast forward (hold)", "Program", 0, false},
     {"Pause", "Pause", "Program", 0, false},
     {"Screenshot", "Screenshot", "Program", 0, false},
+    {"Mute", "Mute / unmute sound", "Program", 0, false},
 };
 
 const ActionInfo& actionInfo(Act a) { return kActions[(int)a]; }
@@ -98,6 +99,7 @@ void Input::setDefaults() {
     K(Act::FastForward, SDL_SCANCODE_GRAVE);
     K(Act::Pause, SDL_SCANCODE_PAUSE);
     K(Act::Screenshot, SDL_SCANCODE_F12);
+    K(Act::Mute, SDL_SCANCODE_F3);
     // Gamepad: face buttons in the same positions as on the DS
     P(Act::Left, SDL_CONTROLLER_BUTTON_DPAD_LEFT); P(Act::Right, SDL_CONTROLLER_BUTTON_DPAD_RIGHT);
     P(Act::Up, SDL_CONTROLLER_BUTTON_DPAD_UP); P(Act::Down, SDL_CONTROLLER_BUTTON_DPAD_DOWN);
@@ -128,6 +130,8 @@ bool Input::load(const std::string& path) {
     for (int i = 0; i < (int)Act::Count; i++) ids[kActions[i].id] = i;
     std::string line;
     bool any = false;
+    bool seen[(int)Act::Count] = {};
+    setDefaults();
     while (std::getline(f, line)) {
         if (line.empty() || line[0] == '#' || line[0] == ';' || line[0] == '[') continue;
         auto eq = line.find('=');
@@ -140,7 +144,9 @@ bool Input::load(const std::string& path) {
         std::string k = trim(line.substr(0, eq)), v = trim(line.substr(eq + 1));
         auto it = ids.find(k);
         if (it == ids.end()) continue;
-        if (!any) { for (auto& b : binds_) b.clear(); any = true; }
+        // actions missing from the file (e.g. added in a newer version) keep their defaults
+        if (!seen[it->second]) { binds_[it->second].clear(); seen[it->second] = true; }
+        any = true;
         std::stringstream ss(v);
         std::string item;
         while (std::getline(ss, item, ',')) {

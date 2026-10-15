@@ -38,6 +38,9 @@ def main(rom_path):
         if flags & 0x01000000:
             raw = blz_decompress(raw)
         open(os.path.join(od, 'ov%03d_%08x.bin' % (oid, ram)), 'wb').write(raw)
+    # The Mobiclip movie decoder is copied from the static ARM9 into ITCM (over overlay 0) while a
+    # movie plays; the recompiler treats it as pseudo-overlay 200 at 0x01ff8500.
+    open(os.path.join(od, 'ov200_01ff8500.bin'), 'wb').write(bytes(dec[0x124ca4:0x124ca4 + 0x65e0]))
     arc = NxArc(os.path.join(out, 'data', 'RESOURCE.NXARC'), os.path.join(out, 'arm9_dec.bin'))
     for name, off, size in arc.entries:
         fp = os.path.join(out, 'nx', name)
