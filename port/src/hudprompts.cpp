@@ -1,6 +1,7 @@
 #include "hudprompts.h"
 
 #include <algorithm>
+#include <cstdlib>
 #include <cstring>
 #include <vector>
 
@@ -211,15 +212,26 @@ int drawChip(uint32_t* s, int x, int y, const Chip& c, const Style& st) {
 struct Match { const PromptTemplate* t; int screen, x, y, fade; };
 
 // anchor colour (18-bit) -> (template, fade variant) candidates, for every template and fade
+struct Candidate {
+    uint16_t ti; uint8_t v;
+    int probeDx, probeDy; uint32_t probe;  // a second pixel (relative to the anchor) checked before the rest
+    bool operator==(const Candidate& o) const { return ti == o.ti && v == o.v; }
+};
 struct AnchorIndex {
     std::vector<uint8_t> any;  // 2^18 flags
-    std::vector<std::vector<std::pair<uint16_t, uint8_t>>> lists;
+    std::vector<std::vector<Candidate>> lists;
     std::vector<int> slot;     // 2^18 -> index into lists (-1 none)
     AnchorIndex() : any(1 << 18), slot(1 << 18, -1) {
         const int n = (int)(sizeof kPromptTemplates / sizeof kPromptTemplates[0]);
+        auto lum = [](uint32_t c) { return (int)(c >> 16) * 3 + (int)(c >> 8 & 255) * 6 + (int)(c & 255); };
         for (int ti = 0; ti < n; ti++) {
             const PromptTemplate& t = kPromptTemplates[ti];
             if (t.shape) continue;  // matched separately (any palette)
+            // probe: the masked pixel least like the anchor (cheap early reject in busy or faded frames)
+            int probe = t.anchor;
+            for (int i = 0; i < t.w * t.h; i++)
+                if (t.mask[i] && std::abs(lum(t.px[i]) - lum(t.px[t.anchor])) > std::abs(lum(t.px[probe]) - lum(t.px[t.anchor])))
+                    probe = i;
             for (int v = 0; v < kVariants; v++) {
                 // skip fade levels that wash the icon out (a black or white screen matches nothing)
                 int lo = 1 << 30, hi = -1;
@@ -229,12 +241,14 @@ struct AnchorIndex {
                     const int l = (int)(c >> 16) * 3 + (int)(c >> 8 & 255) * 6 + (int)(c & 255);
                     lo = std::min(lo, l); hi = std::max(hi, l);
                 }
-                if (v > 0 && hi - lo < 300) continue;
+                // (START/SELECT pills are big enough to be told apart at lower contrast, e.g. dimmed and faded)
+                if (v > 0 && hi - lo < (t.text ? 150 : 300)) continue;
                 uint32_t k = key18(fade(t.px[t.anchor], v));
                 if (slot[k] < 0) { slot[k] = (int)lists.size(); lists.emplace_back(); }
                 auto& l = lists[slot[k]];
-                if (std::find(l.begin(), l.end(), std::make_pair((uint16_t)ti, (uint8_t)v)) == l.end())
-                    l.push_back({(uint16_t)ti, (uint8_t)v});
+                const Candidate c{(uint16_t)ti, (uint8_t)v, probe % t.w - t.anchor % t.w, probe / t.w - t.anchor / t.w,
+                                  fade(t.px[probe], v)};
+                if (std::find(l.begin(), l.end(), c) == l.end()) l.push_back(c);
                 any[k] = 1;
             }
         }
@@ -268,11 +282,13 @@ int apply(uint32_t* top, uint32_t* bottom, const Prompts& prompts) {
             for (int x = 0; x < W; x++) {
                 const uint32_t k = key18(s[y * W + x]);
                 if (!idx.any[k]) continue;
-                for (auto [ti, v] : idx.lists[idx.slot[k]]) {
-                    const PromptTemplate& t = kPromptTemplates[ti];
+                for (const Candidate& c : idx.lists[idx.slot[k]]) {
+                    const PromptTemplate& t = kPromptTemplates[c.ti];
+                    const int v = c.v;
                     if (t.screen != sc && t.screen != 2) continue;
                     const int ox = x - t.anchor % t.w, oy = y - t.anchor / t.w;
                     if (ox < 0 || oy < 0 || ox + t.w > W || oy + t.h > H) continue;
+                    if ((s[(y + c.probeDy) * W + x + c.probeDx] & 0xFFFFFF) != c.probe) continue;
                     bool ok = true;
                     for (int i = 0; i < t.w * t.h && ok; i++)
                         if (t.mask[i] && (s[(oy + i / t.w) * W + ox + i % t.w] & 0xFFFFFF) != fade(t.px[i], v)) ok = false;
@@ -351,16 +367,21 @@ int apply(uint32_t* top, uint32_t* bottom, const Prompts& prompts) {
             }
         if (t.text && l.size() == 1 && l[0].kind == Chip::Keycap) {
             // a button with lettering (START/SELECT): clear the old word, write the key name
-            for (int y = 3; y < t.h - 3; y++)
-                for (int x = 2; x < t.w - 2; x++) put(s, m.x + x, m.y + y, t.fill);
+            for (int y = t.box[1]; y < t.box[3]; y++)
+                for (int x = t.box[0]; x < t.box[2]; x++) put(s, m.x + x, m.y + y, t.fill);
             const Chip& c = l[0];
-            const int ty = m.y + (t.h - 5) / 2 - 1;
-            if (c.sym >= 0) {
-                blit5(s, m.x + (t.w - 5) / 2, ty, kPromptArrows[c.sym & 3], t.ink);
-            } else {
-                int tx = m.x + (t.w - textWidth(c.text)) / 2;
-                for (char ch : c.text)
-                    if (const PromptChar* g = glyph(ch)) { blit5(s, tx, ty, *g, t.ink); tx += g->w + 1; }
+            const int ty = m.y + t.ty;
+            // lettering with an optional drop shadow one pixel below
+            for (int pass = t.shadow ? 0 : 1; pass < 2; pass++) {
+                const uint32_t ink = pass ? t.ink : t.shadow;
+                const int y = ty + (pass ? 0 : 1);
+                if (c.sym >= 0) {
+                    blit5(s, m.x + (t.w - 5) / 2, y, kPromptArrows[c.sym & 3], ink);
+                } else {
+                    int tx = m.x + (t.w - textWidth(c.text)) / 2;
+                    for (char ch : c.text)
+                        if (const PromptChar* g = glyph(ch)) { blit5(s, tx, y, *g, ink); tx += g->w + 1; }
+                }
             }
             n++;
             continue;
@@ -370,8 +391,8 @@ int apply(uint32_t* top, uint32_t* bottom, const Prompts& prompts) {
                 for (int x = 0; x < t.w; x++) put(s, m.x + x, m.y + y, t.erase);
         const Style st{t.style.outline, t.style.face, t.style.light, t.style.ink, t.style.shade1, t.style.shade2};
         const int w = labelWidth(l);
-        const int x = t.align == 1 ? m.x + t.w - w : m.x + (t.w - w) / 2;
-        const int y = m.y + (t.h - kChipH + 1) / 2;
+        const int x = t.align == 1 ? m.x + t.w - w : m.x + (t.cx2 - w) / 2;
+        const int y = m.y + (t.cy2 - kChipH + 1) / 2;
         drawLabel(s, x, y, l, st);
         n++;
     }

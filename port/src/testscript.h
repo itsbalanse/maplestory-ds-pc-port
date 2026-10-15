@@ -1,5 +1,7 @@
 // Scripted input for automated tests (--test-script FILE), same commands as tools/dsharness:
 //   wait N | press KEY [N] | hold KEY | release KEY | touch X Y [N] | shot NAME
+//   touchdown X Y | touchup                 touch and hold until touchup (shots can be taken meanwhile)
+//   rawshot NAME                           like shot, without the PC button prompts (the game's own icons)
 //   until X Y RRGGBB [TIMEOUT]             wait until the pixel (X, Y on the 256x384 stack) has that colour
 //   pressuntil KEY X Y RRGGBB [TIMEOUT]    press KEY every 40 frames until that pixel colour shows
 // KEY: A B SELECT START RIGHT LEFT UP DOWN R L X Y

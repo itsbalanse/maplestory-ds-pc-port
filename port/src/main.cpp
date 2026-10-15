@@ -368,6 +368,13 @@ int main(int argc, char** argv) {
                 if (!shots.empty()) compose();
                 for (auto& name : shots) {
                     if (name.rfind("gpu:", 0) == 0) { emu.dumpGpu(name.substr(4) + ".gpu"); continue; }
+                    if (name.rfind("raw:", 0) == 0) {  // the game's own frame, DS icons not redrawn
+                        for (int i = 0; i < 2; i++)
+                            if (const uint32_t* px = emu.screen(i)) memcpy(frame[i].data(), px, 256 * 192 * 4);
+                        saveFrame(name.substr(4) + ".bmp");
+                        compose();
+                        continue;
+                    }
                     saveFrame(name + ".bmp");
                 }
                 if (script.done()) {

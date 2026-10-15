@@ -31,10 +31,13 @@ rebindable controls.
   * Text: the port overrides the game's tag expansion (`FUN_02017a70`, `runtime/tagprompts.cpp`)
     and turns `\[A\]`, `\[START\]` etc. into keycap / button glyphs that `tools/promptfont.py`
     adds to the font. The English text reserves room for the widest keycap when wrapping.
-  * HUD and menus (skill bar, START/SELECT, dialogue and menu A icons): `src/hudprompts.cpp`
-    finds the DS icons in each finished frame by pixel template (`tools/prompt_templates.py`;
-    also during fades, and in any palette for the small menu icons) and redraws them at DS
-    resolution in the game's colours. It costs under 1 ms per frame.
+  * HUD and menus (skill bar, START/SELECT pills also while pressed, dialogue and menu A icons,
+    Skills and Map screens, list paging L/R tabs, the controller pictures of the Hint pages and
+    the DS console of the prologue book): `src/hudprompts.cpp` finds the DS icons in each
+    finished frame by pixel template (`tools/prompt_templates.py`, cut from test shots or straight
+    from the English ROM's graphics; also during fades, in 3D-drawn colours, and in any palette
+    for the small menu icons) and redraws them at DS resolution in the game's colours. It costs
+    about 1 ms per frame.
   * F4 switches back to the original DS icons (`pc_prompts` in `settings.ini`).
 * Tests: `--device keyboard|pad|ps|switch` fixes the prompt device; `--prompt-image IN OUT`
   redraws the icons of a 256x384 screenshot (and prints the time per frame).
@@ -56,6 +59,7 @@ Run `MapleStoryDS.exe` next to (or pointed at) `MapleStory DS (English).nds`.
 
 * `--test-script FILE`: headless run with scripted input (`wait`, `press`, `hold`, `release`,
   `touch`, `shot`, `until X Y RRGGBB`, `pressuntil KEY X Y RRGGBB`). Uses its own save file.
+  `rawshot NAME` saves the frame without the PC button prompts (for cutting icon templates).
   `gpudump NAME` writes both 2D engines' VRAM, palettes, OAM and registers; decode with
   `tools/gpudump.py NAME.gpu OUTDIR [x0 y0 x1 y1 screen]` (renders layers, lists what covers a rectangle).
 * `MSDS_TRACE=file`: log every function entry (both modes); compare with
