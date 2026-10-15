@@ -102,6 +102,8 @@ class Builder:
                 nb = self.process_gmm(name, None, d)
                 if nb is not None:
                     repl[name] = nb
+        from gfx_patch import gfx_replacements  # English graphics (translation/gfx)
+        repl.update(gfx_replacements())
         new_arc = rebuild_nxarc(arc, repl)
         rom = NDS(ROM_IN)
         out = rebuild_rom(rom, {rom.files['RESOURCE.NXARC']: new_arc})
