@@ -77,6 +77,7 @@ void TestScript::frame(uint32_t& keyMask, bool& touching, int& tx, int& ty, std:
             if (c.op == "release") { held_ &= ~keyBit(c.args.empty() ? "" : c.args[0]); continue; }
             if (c.op == "touch") { tx_ = arg(0, 0); ty_ = arg(1, 0); touchLeft_ = arg(2, 6); touching_ = true; break; }
             if (c.op == "shot" && !c.args.empty()) { shots.push_back(c.args[0]); continue; }
+            if (c.op == "gpudump" && !c.args.empty()) { shots.push_back("gpu:" + c.args[0]); continue; }
             if ((c.op == "until" && c.args.size() >= 3) || (c.op == "pressuntil" && c.args.size() >= 4)) {
                 size_t o = c.op == "until" ? 0 : 1;
                 pKey_ = o ? keyBit(c.args[0]) : 0;

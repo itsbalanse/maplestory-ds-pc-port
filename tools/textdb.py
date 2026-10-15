@@ -82,10 +82,15 @@ def has_jp(t):
     return any('぀' <= c <= 'ヿ' or '一' <= c <= '鿿' or '＀' <= c <= '￯' or '　' <= c <= '〿' for c in t)
 
 # ---------------------------------------------------------------- wrapping
-_TOKEN = re.compile(r'(\[' + re.escape(BS) + r'n\]|' + re.escape(BS) + r'\[name[:：][A-Z]_PC' + re.escape(BS) + r'\]|\[[A-Za-z<>^]\]|\[color:[a-z]\]|\[\]|' + re.escape(BS) + r'\[|' + re.escape(BS) + r'\])')
+# button tags first: escaped \[A\] etc. render as one prompt (keycap/button) in the PC port
+_BUTTON = re.escape(BS) + r'\[(?:[ABXYLR<>v^]|START|SELECT)' + re.escape(BS) + r'\]'
+_COMBO = re.escape(BS) + r'\[\^' + re.escape(BS) + r'\]\+' + _BUTTON  # Up + L/Y/X: skills 4-6
+_TOKEN = re.compile(r'(' + _COMBO + r'|' + _BUTTON + r'|\[' + re.escape(BS) + r'n\]|' + re.escape(BS) + r'\[name[:：][A-Z]_PC' + re.escape(BS) + r'\]|\[[A-Za-z<>^]\]|\[color:[a-z]\]|\[\]|' + re.escape(BS) + r'\[|' + re.escape(BS) + r'\])')
 
 class Wrapper:
     NAME_PX = 60  # worst-case width reserved for the player's name
+    COMBO_PX = 40   # Up + skill button: one keycap, or d-pad icon + shoulder button
+    BUTTON_PX = 27  # a button prompt: DS icon (11px) or a PC keycap such as SHIFT (25px)
 
     def __init__(self, measurer):
         self.m = measurer
@@ -106,8 +111,10 @@ class Wrapper:
             return 0
         if tok in ('[]',):
             return self.char_px(' ')
-        if len(tok) == 3 and tok[0] == '[' and tok[2] == ']':
-            return 12  # button icon glyph
+        if re.fullmatch(_COMBO, tok):
+            return self.COMBO_PX
+        if re.fullmatch(_BUTTON, tok) or (len(tok) == 3 and tok[0] == '[' and tok[2] == ']'):
+            return self.BUTTON_PX
         if tok in (BS + '[', BS + ']'):
             return self.char_px(tok[1])
         return sum(self.char_px(c) for c in tok)

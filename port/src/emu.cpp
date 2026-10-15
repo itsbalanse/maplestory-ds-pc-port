@@ -108,6 +108,44 @@ bool Emu::loadState(const std::string& path) {
     return nds_->DoSavestate(&st) && !st.Error;
 }
 
+uint16_t Emu::masterBrightness(int screen) const {
+    if (!nds_) return 0;
+    const bool aOnTop = nds_->PowerControl9 & 0x8000;
+    const GPU2D::Unit& u = (screen == 0) == aOnTop ? nds_->GPU.GPU2D_A : nds_->GPU.GPU2D_B;
+    return u.MasterBrightness;
+}
+
+bool Emu::dumpGpu(const std::string& path) const {
+    if (!nds_) return false;
+    FILE* f = fopen(path.c_str(), "wb");
+    if (!f) return false;
+    GPU& g = nds_->GPU;
+    // header: magic, POWCNT1, then per engine: DispCnt, BGCnt[4], BGXPos[4], BGYPos[4]
+    fwrite("MSGPU1\0\0", 1, 8, f);
+    u32 pow = nds_->PowerControl9;
+    fwrite(&pow, 4, 1, f);
+    for (const GPU2D::Unit* u : {&g.GPU2D_A, &g.GPU2D_B}) {
+        fwrite(&u->DispCnt, 4, 1, f);
+        fwrite(u->BGCnt, 2, 4, f);
+        fwrite(u->BGXPos, 2, 4, f);
+        fwrite(u->BGYPos, 2, 4, f);
+    }
+    fwrite(g.Palette, 1, sizeof g.Palette, f);
+    fwrite(g.OAM, 1, sizeof g.OAM, f);
+    std::vector<u8> buf;
+    auto dump = [&](u32 size, auto rd) {
+        buf.resize(size);
+        for (u32 a = 0; a < size; a += 4) { u32 v = rd(a); memcpy(&buf[a], &v, 4); }
+        fwrite(buf.data(), 1, size, f);
+    };
+    dump(0x80000, [&](u32 a) { return g.ReadVRAM_ABG<u32>(a); });
+    dump(0x40000, [&](u32 a) { return g.ReadVRAM_AOBJ<u32>(a); });
+    dump(0x20000, [&](u32 a) { return g.ReadVRAM_BBG<u32>(a); });
+    dump(0x20000, [&](u32 a) { return g.ReadVRAM_BOBJ<u32>(a); });
+    fclose(f);
+    return true;
+}
+
 void Emu::onSaveWrite(const uint8_t* data, uint32_t len) {
     pendingSave_.assign(data, data + len);
     saveDirty_ = true;

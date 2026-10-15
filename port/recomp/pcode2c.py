@@ -88,6 +88,7 @@ def parse(path):
 OVERRIDES = {
     0x020c3af8: 'ovr_OS_SaveContext',
     0x020c3b44: 'ovr_OS_LoadContext',
+    0x02017a70: 'ovr_ExpandTags',      # button prompts for the player's bindings (runtime/tagprompts.cpp)
 }
 
 COND_C = {0x0: 'c->ZR', 0x1: '!c->ZR', 0x2: 'c->CY', 0x3: '!c->CY', 0x4: 'c->NG', 0x5: '!c->NG',

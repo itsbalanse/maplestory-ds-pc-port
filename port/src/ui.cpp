@@ -109,6 +109,8 @@ void Overlay::closeEditor() {
 
 static std::string bindingLabel(const Binding& b) {
     if (b.type == Binding::Key) return SDL_GetScancodeName((SDL_Scancode)b.code);
+    if (b.type == Binding::Mouse)
+        return b.code == SDL_BUTTON_RIGHT ? "Right Mouse" : b.code == SDL_BUTTON_MIDDLE ? "Middle Mouse" : b.code == SDL_BUTTON_X1 ? "Mouse 4" : "Mouse 5";
     if (b.type == Binding::PadAxis) {
         switch (b.code) {
         case SDL_CONTROLLER_AXIS_LEFTX: return b.dir < 0 ? "Stick Left" : "Stick Right";
@@ -144,6 +146,11 @@ bool Overlay::handleEvent(const SDL_Event& e) {
         }
         if (e.type == SDL_CONTROLLERBUTTONDOWN) {
             in_.addBinding((Act)sel_, {Binding::PadButton, (int)e.cbutton.button, 0});
+            listening_ = false;
+            return true;
+        }
+        if (e.type == SDL_MOUSEBUTTONDOWN && e.button.button != SDL_BUTTON_LEFT) {  // left = touch screen
+            in_.addBinding((Act)sel_, {Binding::Mouse, (int)e.button.button, 0});
             listening_ = false;
             return true;
         }
@@ -205,7 +212,7 @@ void Overlay::drawEditor(int w, int h) {
     text_.draw("Key Bindings", title, w / 2, y, {255, 214, 90, 255}, 1);
     y += title + 12;
     if (listening_) {
-        text_.draw("Press a key or gamepad button to add it   (Esc cancels)", px - 2, w / 2, y, {255, 200, 120, 255}, 1);
+        text_.draw("Press a key, mouse button or gamepad button to add it   (Esc cancels)", px - 2, w / 2, y, {255, 200, 120, 255}, 1);
         y += px + 4;
         text_.draw(std::string("Binding: ") + actionInfo((Act)sel_).label, px - 2, w / 2, y, {255, 200, 120, 255}, 1);
     } else {
@@ -217,7 +224,7 @@ void Overlay::drawEditor(int w, int h) {
 
     int colLabel = 24, colKeys = (int)(w * 0.40), colPad = (int)(w * 0.69);
     text_.draw("Action", px, colLabel, y, {140, 160, 210, 255});
-    text_.draw("Keyboard", px, colKeys, y, {140, 160, 210, 255});
+    text_.draw("Keyboard & mouse", px, colKeys, y, {140, 160, 210, 255});
     text_.draw("Gamepad", px, colPad, y, {140, 160, 210, 255});
     y += px + 10;
 
@@ -240,7 +247,7 @@ void Overlay::drawEditor(int w, int h) {
         text_.draw(info.label, px, colLabel, ry, lc);
         std::string keys, pads;
         for (auto& b : in_.bindings((Act)i)) {
-            std::string& dst = b.type == Binding::Key ? keys : pads;
+            std::string& dst = b.keyboardSide() ? keys : pads;
             if (!dst.empty()) dst += ", ";
             dst += bindingLabel(b);
         }

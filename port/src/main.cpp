@@ -18,6 +18,8 @@
 #include "emu.h"
 #include "input.h"
 #include "ui.h"
+#include "prompts.h"
+#include "hudprompts.h"
 #include "runtime.h"
 #include "testscript.h"
 
@@ -31,6 +33,7 @@ struct Settings {
     bool smooth = false;
     bool fullscreen = false;
     bool mute = false;
+    bool pcPrompts = true;   // show bound keys/buttons instead of the DS button icons
     int winW = 768, winH = 1152;
 
     void load(const std::string& p) {
@@ -49,6 +52,7 @@ struct Settings {
             else if (k == "smooth") smooth = v == "1";
             else if (k == "fullscreen") fullscreen = v == "1";
             else if (k == "mute") mute = v == "1";
+            else if (k == "pc_prompts") pcPrompts = v == "1";
             else if (k == "window_width") winW = std::max(256, std::atoi(v.c_str()));
             else if (k == "window_height") winH = std::max(192, std::atoi(v.c_str()));
         }
@@ -62,6 +66,7 @@ struct Settings {
           << "smooth = " << smooth << "\n"
           << "fullscreen = " << fullscreen << "\n"
           << "mute = " << mute << "\n"
+          << "pc_prompts = " << pcPrompts << "\n"
           << "window_width = " << winW << "\n"
           << "window_height = " << winH << "\n";
     }
@@ -141,12 +146,13 @@ int main(int argc, char** argv) {
     cfg.load(settingsPath);
     Input input;
     if (!input.load(bindPath)) input.save(bindPath);
+    Prompts prompts(input);
 
     // Self-test options (used by tools to verify rendering without user interaction)
     int testFrames = 0;
     std::string testShot;
     bool testEditor = false;
-    std::string testScriptPath, testSave;
+    std::string testScriptPath, testSave, promptIn, promptOut;
     for (int i = 1; i < argc; i++) {
         std::string a = argv[i];
         if (a == "--verbose") Emu::verbose = true;
@@ -155,9 +161,37 @@ int main(int argc, char** argv) {
         else if (a == "--test-shot" && i + 1 < argc) testShot = argv[++i];
         else if (a == "--test-editor") testEditor = true;
         else if (a == "--mute") cfg.mute = true;
+        else if (a == "--device" && i + 1 < argc) {  // tests: show prompts for this device
+            std::string d = argv[++i];
+            input.setTestDevice(d == "keyboard" ? Device::Keyboard : Device::Pad,
+                                d == "ps" ? PadStyle::PlayStation : d == "switch" ? PadStyle::Nintendo : PadStyle::Xbox);
+        }
         else if (a == "--test-script" && i + 1 < argc) testScriptPath = argv[++i];
         else if (a == "--test-save" && i + 1 < argc) testSave = argv[++i];
+        else if (a == "--prompt-image" && i + 2 < argc) {  // tests: redraw the button icons of a 256x384 BMP
+            promptIn = argv[++i];
+            promptOut = argv[++i];
+        }
         else cfg.rom = a;
+    }
+    if (!promptIn.empty()) {
+        SDL_Surface* raw = SDL_LoadBMP(promptIn.c_str());
+        if (!raw) { fprintf(stderr, "cannot read %s\n", promptIn.c_str()); return 1; }
+        SDL_Surface* img = SDL_ConvertSurfaceFormat(raw, SDL_PIXELFORMAT_ARGB8888, 0);
+        SDL_FreeSurface(raw);
+        if (!img || img->w != 256 || img->h != 384) { fprintf(stderr, "need a 256x384 image\n"); return 1; }
+        prompts.update();
+        uint32_t* px = (uint32_t*)img->pixels;  // pitch is 1024 for 256 ARGB pixels
+        std::vector<uint32_t> copy(px, px + 256 * 384);
+        Uint64 t0 = SDL_GetPerformanceCounter();
+        for (int i = 0; i < 50; i++) { std::vector<uint32_t> c = copy; hudprompts::apply(c.data(), c.data() + 256 * 192, prompts); }
+        double ms = (double)(SDL_GetPerformanceCounter() - t0) * 1000.0 / SDL_GetPerformanceFrequency() / 50;
+        int n = hudprompts::apply(px, px + 256 * 192, prompts);
+        printf("%.3f ms per frame, ", ms);
+        SDL_SaveBMP(img, promptOut.c_str());
+        SDL_FreeSurface(img);
+        printf("%d icons redrawn\n", n);
+        return 0;
     }
     if (cfg.rom.empty() || !fs::exists(fs::u8path(cfg.rom))) cfg.rom = findRom(base);
     if (cfg.rom.empty()) cfg.rom = pickRomDialog();
@@ -209,8 +243,7 @@ int main(int argc, char** argv) {
     Overlay ui(ren, input, bindPath);
     ui.toast("F1: key bindings   F2: screen layout   F11: fullscreen");
 
-    for (int i = 0; i < SDL_NumJoysticks(); i++)
-        if (SDL_IsGameController(i) && !input.pad) input.pad = SDL_GameControllerOpen(i);
+    input.openPads();
 
     const double frameSec = 1.0 / 59.8261;
     const int frameBytes = (int)(Emu::kSampleRate * frameSec) * 4;
@@ -222,6 +255,24 @@ int main(int argc, char** argv) {
     int tx = 0, ty = 0;
     std::string statePath = cfg.rom.substr(0, cfg.rom.find_last_of('.')) + ".state";
 
+    // Frame as shown: the emulator's screens with the DS button icons redrawn for the player's bindings
+    std::vector<uint32_t> frame[2] = {std::vector<uint32_t>(256 * 192), std::vector<uint32_t>(256 * 192)};
+    auto compose = [&]() {
+        for (int i = 0; i < 2; i++) {
+            const uint32_t* px = emu.screen(i);
+            if (px) memcpy(frame[i].data(), px, 256 * 192 * 4);
+        }
+        if (cfg.pcPrompts) hudprompts::apply(frame[0].data(), frame[1].data(), prompts);
+    };
+    auto saveFrame = [&](const std::string& path) {
+        SDL_Surface* s = SDL_CreateRGBSurfaceWithFormat(0, 256, 384, 32, SDL_PIXELFORMAT_ARGB8888);
+        memcpy(s->pixels, frame[0].data(), 256 * 192 * 4);
+        memcpy((uint8_t*)s->pixels + 256 * 192 * 4, frame[1].data(), 256 * 192 * 4);
+        SDL_SaveBMP(s, path.c_str());
+        SDL_FreeSurface(s);
+    };
+
+    prompts.setEnabled(cfg.pcPrompts);
     if (testEditor) ui.openEditor();
     int frameNo = 0;
     while (running) {
@@ -270,6 +321,7 @@ int main(int argc, char** argv) {
         }
 
         input.update();
+        prompts.update();
         if (ui.editorOpen()) {
             // game paused while editing bindings
         } else {
@@ -284,21 +336,22 @@ int main(int argc, char** argv) {
                 if (cfg.mute && audio) SDL_ClearQueuedAudio(audio);
                 ui.toast(cfg.mute ? "Sound muted (F3)" : "Sound on (F3)");
             }
+            if (input.pressed(Act::TogglePrompts)) {
+                cfg.pcPrompts = !cfg.pcPrompts;
+                prompts.setEnabled(cfg.pcPrompts);
+                ui.toast(cfg.pcPrompts ? "Showing your keys and buttons (F4)" : "Showing the original DS buttons (F4)");
+            }
             if (input.pressed(Act::Pause)) { paused = !paused; ui.toast(paused ? "Paused" : "Resumed"); }
             if (input.pressed(Act::QuickSave))
                 ui.toast(emu.recompiled() ? "Save states need --interp mode (use the in-game save)" : emu.saveState(statePath) ? "State saved" : "Could not save state");
             if (input.pressed(Act::QuickLoad))
                 ui.toast(emu.recompiled() ? "Save states need --interp mode (use the in-game save)" : emu.loadState(statePath) ? "State loaded" : "No saved state");
             if (input.pressed(Act::Screenshot)) {
-                SDL_Surface* s = SDL_CreateRGBSurfaceWithFormat(0, 256, 384, 32, SDL_PIXELFORMAT_ARGB8888);
-                memcpy(s->pixels, emu.screen(0), 256 * 192 * 4);
-                memcpy((uint8_t*)s->pixels + 256 * 192 * 4, emu.screen(1), 256 * 192 * 4);
                 fs::create_directories(fs::u8path(base + "screenshots"));
                 char name[64];
                 std::time_t t = std::time(nullptr);
                 std::strftime(name, sizeof name, "screenshots/%Y%m%d_%H%M%S.bmp", std::localtime(&t));
-                SDL_SaveBMP(s, (base + name).c_str());
-                SDL_FreeSurface(s);
+                saveFrame(base + name);
                 ui.toast(std::string("Saved ") + name);
             }
         }
@@ -312,12 +365,10 @@ int main(int argc, char** argv) {
                 script.frame(mask, touching, tx, ty, shots);
                 frames = 1;
                 emu.runFrame(mask, touching, tx, ty);
+                if (!shots.empty()) compose();
                 for (auto& name : shots) {
-                    SDL_Surface* s = SDL_CreateRGBSurfaceWithFormat(0, 256, 384, 32, SDL_PIXELFORMAT_ARGB8888);
-                    memcpy(s->pixels, emu.screen(0), 256 * 192 * 4);
-                    memcpy((uint8_t*)s->pixels + 256 * 192 * 4, emu.screen(1), 256 * 192 * 4);
-                    SDL_SaveBMP(s, (name + ".bmp").c_str());
-                    SDL_FreeSurface(s);
+                    if (name.rfind("gpu:", 0) == 0) { emu.dumpGpu(name.substr(4) + ".gpu"); continue; }
+                    saveFrame(name + ".bmp");
                 }
                 if (script.done()) {
                     running = false;
@@ -325,11 +376,8 @@ int main(int argc, char** argv) {
                     recomp::traceStop();
                     if (script.failed()) {
                         exitCode = 2;
-                        SDL_Surface* s = SDL_CreateRGBSurfaceWithFormat(0, 256, 384, 32, SDL_PIXELFORMAT_ARGB8888);
-                        memcpy(s->pixels, emu.screen(0), 256 * 192 * 4);
-                        memcpy((uint8_t*)s->pixels + 256 * 192 * 4, emu.screen(1), 256 * 192 * 4);
-                        SDL_SaveBMP(s, "fail.bmp");
-                        SDL_FreeSurface(s);
+                        compose();
+                        saveFrame("fail.bmp");
                     }
                 }
                 frames = 0;
@@ -350,9 +398,9 @@ int main(int argc, char** argv) {
         SDL_SetRenderDrawColor(ren, 0, 0, 0, 255);
         SDL_RenderClear(ren);
         Layout L = computeLayout(cfg.layout, rw, rh, cfg.integerScale);
+        compose();
         for (int i = 0; i < 2; i++) {
-            const uint32_t* px = emu.screen(i);
-            if (px) SDL_UpdateTexture(scr[i], nullptr, px, 256 * 4);
+            SDL_UpdateTexture(scr[i], nullptr, frame[i].data(), 256 * 4);
             SDL_SetTextureScaleMode(scr[i], cfg.smooth ? SDL_ScaleModeLinear : SDL_ScaleModeNearest);
             SDL_RenderCopy(ren, scr[i], nullptr, i == 0 ? &L.top : &L.bottom);
         }

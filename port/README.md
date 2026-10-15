@@ -19,6 +19,26 @@ rebindable controls.
 * Save states (F5/F9) only work with `--interp`; the game's own save works in both modes.
 * Only the intro and first stage have been played through automatically so far.
 
+## Controls and button prompts
+
+* Everything is rebindable in game (F1): keyboard keys, mouse buttons (right, middle, side; left
+  click is the touch screen) and controller buttons/sticks/triggers. Bindings live in
+  `keybinds.ini`. Defaults follow modern MapleStory: Alt jump, Ctrl attack, Shift guard,
+  A/S/D and Z/X/C skills, arrows to move, Space talk, Esc menu.
+* The game shows the keys you actually use. It switches to controller prompts when a controller
+  is used (and when one is connected at start), and back to keyboard prompts on key or mouse
+  input. Xbox, PlayStation and Nintendo controllers get their own button names and symbols.
+  * Text: the port overrides the game's tag expansion (`FUN_02017a70`, `runtime/tagprompts.cpp`)
+    and turns `\[A\]`, `\[START\]` etc. into keycap / button glyphs that `tools/promptfont.py`
+    adds to the font. The English text reserves room for the widest keycap when wrapping.
+  * HUD and menus (skill bar, START/SELECT, dialogue and menu A icons): `src/hudprompts.cpp`
+    finds the DS icons in each finished frame by pixel template (`tools/prompt_templates.py`;
+    also during fades, and in any palette for the small menu icons) and redraws them at DS
+    resolution in the game's colours. It costs under 1 ms per frame.
+  * F4 switches back to the original DS icons (`pc_prompts` in `settings.ini`).
+* Tests: `--device keyboard|pad|ps|switch` fixes the prompt device; `--prompt-image IN OUT`
+  redraws the icons of a 256x384 screenshot (and prints the time per frame).
+
 ## Build
 
 ```
@@ -36,6 +56,8 @@ Run `MapleStoryDS.exe` next to (or pointed at) `MapleStory DS (English).nds`.
 
 * `--test-script FILE`: headless run with scripted input (`wait`, `press`, `hold`, `release`,
   `touch`, `shot`, `until X Y RRGGBB`, `pressuntil KEY X Y RRGGBB`). Uses its own save file.
+  `gpudump NAME` writes both 2D engines' VRAM, palettes, OAM and registers; decode with
+  `tools/gpudump.py NAME.gpu OUTDIR [x0 y0 x1 y1 screen]` (renders layers, lists what covers a rectangle).
 * `MSDS_TRACE=file`: log every function entry (both modes); compare with
   `tools/tracediff.py interp.trace recomp.trace [--from ADDR:LR] [--strict]`.
 * `MSDS_WATCH=addr[:len]`: log writes to guest memory with the current function and call stack.

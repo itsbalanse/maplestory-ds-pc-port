@@ -31,6 +31,11 @@ public:
     bool saveState(const std::string& path);
     bool loadState(const std::string& path);
 
+    // Debug: write both 2D engines' VRAM views, palettes, OAM and registers (tools/gpudump.py)
+    bool dumpGpu(const std::string& path) const;
+    // MASTER_BRIGHT register of the engine shown on screen 0 (top) / 1 (bottom)
+    uint16_t masterBrightness(int screen) const;
+
     void onSaveWrite(const uint8_t* data, uint32_t len);
     void flushSave();
 

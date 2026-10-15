@@ -38,7 +38,9 @@ def patch_font(raw):
             if ch == '!':
                 l, gw, cw = (0, f.widths[gi][1], f.widths[gi][1])
             out[o:o + 3] = struct.pack('<bBB', l, gw, cw)
-    return bytes(out)
+    # keycap / controller glyphs for the PC port's button prompts (unused on a DS)
+    from promptfont import add_to_nftr
+    return add_to_nftr(bytes(out))
 
 class Builder:
     def __init__(self):

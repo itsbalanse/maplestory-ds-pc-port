@@ -1,6 +1,7 @@
 #include "input.h"
 
 #include <algorithm>
+#include <cstdlib>
 #include <cstdio>
 #include <cstring>
 #include <fstream>
@@ -35,6 +36,7 @@ static const ActionInfo kActions[(int)Act::Count] = {
     {"Pause", "Pause", "Program", 0, false},
     {"Screenshot", "Screenshot", "Program", 0, false},
     {"Mute", "Mute / unmute sound", "Program", 0, false},
+    {"TogglePrompts", "PC button prompts on/off", "Program", 0, false},
 };
 
 const ActionInfo& actionInfo(Act a) { return kActions[(int)a]; }
@@ -44,6 +46,7 @@ std::string Binding::name() const {
     case Key: return std::string("key:") + SDL_GetScancodeName((SDL_Scancode)code);
     case PadButton: return std::string("pad:") + SDL_GameControllerGetStringForButton((SDL_GameControllerButton)code);
     case PadAxis: return std::string("pad:") + (dir < 0 ? "-" : "+") + SDL_GameControllerGetStringForAxis((SDL_GameControllerAxis)code);
+    case Mouse: return std::string("mouse:") + (code == SDL_BUTTON_RIGHT ? "right" : code == SDL_BUTTON_MIDDLE ? "middle" : code == SDL_BUTTON_X1 ? "x1" : "x2");
     }
     return "?";
 }
@@ -53,6 +56,13 @@ static bool parseBinding(const std::string& s, Binding& b) {
         SDL_Scancode sc = SDL_GetScancodeFromName(s.substr(4).c_str());
         if (sc == SDL_SCANCODE_UNKNOWN) return false;
         b = {Binding::Key, (int)sc, 0};
+        return true;
+    }
+    if (s.rfind("mouse:", 0) == 0) {
+        std::string n = s.substr(6);
+        int c = n == "right" ? SDL_BUTTON_RIGHT : n == "middle" ? SDL_BUTTON_MIDDLE : n == "x1" ? SDL_BUTTON_X1 : n == "x2" ? SDL_BUTTON_X2 : 0;
+        if (!c) return false;
+        b = {Binding::Mouse, c, 0};
         return true;
     }
     if (s.rfind("pad:", 0) == 0) {
@@ -100,6 +110,7 @@ void Input::setDefaults() {
     K(Act::Pause, SDL_SCANCODE_PAUSE);
     K(Act::Screenshot, SDL_SCANCODE_F12);
     K(Act::Mute, SDL_SCANCODE_F3);
+    K(Act::TogglePrompts, SDL_SCANCODE_F4);
     // Gamepad: face buttons in the same positions as on the DS
     P(Act::Left, SDL_CONTROLLER_BUTTON_DPAD_LEFT); P(Act::Right, SDL_CONTROLLER_BUTTON_DPAD_RIGHT);
     P(Act::Up, SDL_CONTROLLER_BUTTON_DPAD_UP); P(Act::Down, SDL_CONTROLLER_BUTTON_DPAD_DOWN);
@@ -114,14 +125,53 @@ void Input::setDefaults() {
     P(Act::Menu, SDL_CONTROLLER_BUTTON_START);
     P(Act::Select, SDL_CONTROLLER_BUTTON_BACK);
     X(Act::FastForward, SDL_CONTROLLER_AXIS_TRIGGERRIGHT, 1);
+    bindingsChanged();
+}
+
+void Input::openPads() {
+    for (int i = 0; i < SDL_NumJoysticks() && !pad; i++)
+        if (SDL_IsGameController(i)) pad = SDL_GameControllerOpen(i);
+    if (pad) useDevice(Device::Pad);
 }
 
 void Input::addBinding(Act a, const Binding& b) {
     for (auto& v : binds_) v.erase(std::remove(v.begin(), v.end(), b), v.end());
     binds_[(int)a].push_back(b);
+    bindingsChanged();
 }
 
-void Input::clearBindings(Act a) { binds_[(int)a].clear(); }
+void Input::clearBindings(Act a) { binds_[(int)a].clear(); bindingsChanged(); }
+
+void Input::useDevice(Device d) {
+    if (testDevice_) return;
+    if (d != device_) { device_ = d; promptVersion_++; }
+}
+
+void Input::setTestDevice(Device d, PadStyle s) {
+    device_ = d; testStyle_ = s; testDevice_ = true; promptVersion_++;
+}
+
+PadStyle Input::padStyle() const {
+    if (testDevice_) return testStyle_;
+    if (!pad) return PadStyle::Xbox;
+    switch (SDL_GameControllerGetType(pad)) {
+    case SDL_CONTROLLER_TYPE_PS3: case SDL_CONTROLLER_TYPE_PS4: case SDL_CONTROLLER_TYPE_PS5:
+        return PadStyle::PlayStation;
+    case SDL_CONTROLLER_TYPE_NINTENDO_SWITCH_PRO:
+    case SDL_CONTROLLER_TYPE_NINTENDO_SWITCH_JOYCON_LEFT:
+    case SDL_CONTROLLER_TYPE_NINTENDO_SWITCH_JOYCON_RIGHT:
+    case SDL_CONTROLLER_TYPE_NINTENDO_SWITCH_JOYCON_PAIR:
+        return PadStyle::Nintendo;
+    default:
+        return PadStyle::Xbox;
+    }
+}
+
+const Binding* Input::firstBinding(Act a, Device d) const {
+    for (auto& b : binds_[(int)a])
+        if (b.keyboardSide() == (d == Device::Keyboard)) return &b;
+    return nullptr;
+}
 
 bool Input::load(const std::string& path) {
     std::ifstream f(path);
@@ -161,7 +211,7 @@ bool Input::save(const std::string& path) const {
     std::ofstream f(path);
     if (!f) return false;
     f << "# MapleStory DS key bindings. Edit here or in game with F1.\n"
-         "# Format: Action = key:<SDL key name>, pad:<button>, pad:+axis / pad:-axis\n";
+         "# Format: Action = key:<SDL key name>, mouse:right|middle|x1|x2, pad:<button>, pad:+axis / pad:-axis\n";
     const char* group = "";
     for (int i = 0; i < (int)Act::Count; i++) {
         if (strcmp(group, kActions[i].group) != 0) { group = kActions[i].group; f << "\n[" << group << "]\n"; }
@@ -176,20 +226,28 @@ void Input::handleEvent(const SDL_Event& e) {
     switch (e.type) {
     case SDL_KEYDOWN: case SDL_KEYUP:
         if (e.key.keysym.scancode < SDL_NUM_SCANCODES) keyDown_[e.key.keysym.scancode] = e.type == SDL_KEYDOWN;
+        if (e.type == SDL_KEYDOWN) useDevice(Device::Keyboard);
+        break;
+    case SDL_MOUSEBUTTONDOWN: case SDL_MOUSEBUTTONUP:
+        if (e.button.button < 8) mouseBtn_[e.button.button] = e.type == SDL_MOUSEBUTTONDOWN;
+        if (e.type == SDL_MOUSEBUTTONDOWN) useDevice(Device::Keyboard);
         break;
     case SDL_CONTROLLERBUTTONDOWN: case SDL_CONTROLLERBUTTONUP:
         if (e.cbutton.button < SDL_CONTROLLER_BUTTON_MAX) padBtn_[e.cbutton.button] = e.type == SDL_CONTROLLERBUTTONDOWN;
+        if (e.type == SDL_CONTROLLERBUTTONDOWN) useDevice(Device::Pad);
         break;
     case SDL_CONTROLLERAXISMOTION:
         if (e.caxis.axis < SDL_CONTROLLER_AXIS_MAX) padAxis_[e.caxis.axis] = e.caxis.value;
+        if (std::abs((int)e.caxis.value) > 16000) useDevice(Device::Pad);  // ignore stick drift
         break;
     case SDL_CONTROLLERDEVICEADDED:
-        if (!pad) pad = SDL_GameControllerOpen(e.cdevice.which);
+        if (!pad) { pad = SDL_GameControllerOpen(e.cdevice.which); if (pad) { useDevice(Device::Pad); promptVersion_++; } }
         break;
     case SDL_CONTROLLERDEVICEREMOVED:
         if (pad && SDL_JoystickInstanceID(SDL_GameControllerGetJoystick(pad)) == e.cdevice.which) {
             SDL_GameControllerClose(pad); pad = nullptr;
             memset(padBtn_, 0, sizeof padBtn_); memset(padAxis_, 0, sizeof padAxis_);
+            useDevice(Device::Keyboard);
         }
         break;
     case SDL_WINDOWEVENT:
@@ -202,6 +260,7 @@ void Input::releaseAll() {
     memset(keyDown_, 0, sizeof keyDown_);
     memset(padBtn_, 0, sizeof padBtn_);
     memset(padAxis_, 0, sizeof padAxis_);
+    memset(mouseBtn_, 0, sizeof mouseBtn_);
 }
 
 bool Input::active(Act a) const {
@@ -210,6 +269,7 @@ bool Input::active(Act a) const {
         case Binding::Key: if (keyDown_[b.code]) return true; break;
         case Binding::PadButton: if (padBtn_[b.code]) return true; break;
         case Binding::PadAxis: if (padAxis_[b.code] * b.dir > 16000) return true; break;
+        case Binding::Mouse: if (b.code < 8 && mouseBtn_[b.code]) return true; break;
         }
     }
     return false;
