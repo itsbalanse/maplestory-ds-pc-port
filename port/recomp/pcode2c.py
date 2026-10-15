@@ -449,10 +449,10 @@ class Emitter:
         t = self.target_fn(fn, addr, space)
         if t is not None and t.space == 'ram' and in_itcm_overlay(addr) and image_of(fn) != 'itcm0':
             # ITCM above 0x01ff8500 is swapped at runtime (overlay 0 / movie decoder): dispatch
-            return 'rt_call(c, 0x%08xu);' % addr
+            return 'rt_call(c, 0x%08xu | c->TB);' % addr
         if t is not None and (t.space == 'ram' or t.space == fn.space):
             return '%s(c);' % t.cname
-        return 'rt_call(c, 0x%08xu);' % addr
+        return 'rt_call(c, 0x%08xu | c->TB);' % addr
 
     def emit_op(self, fn, ins, k, opc, out, inp, locals_, flush, fall):
         R = lambda v: self.rd(v, locals_)
