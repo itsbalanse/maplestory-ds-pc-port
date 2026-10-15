@@ -146,6 +146,8 @@ int main(int argc, char** argv) {
     cfg.load(settingsPath);
     Input input;
     if (!input.load(bindPath)) input.save(bindPath);
+    const bool savedMute = cfg.mute;
+    bool muteForRun = false;
     Prompts prompts(input);
 
     // Self-test options (used by tools to verify rendering without user interaction)
@@ -160,7 +162,7 @@ int main(int argc, char** argv) {
         else if (a == "--test-frames" && i + 1 < argc) testFrames = std::atoi(argv[++i]);
         else if (a == "--test-shot" && i + 1 < argc) testShot = argv[++i];
         else if (a == "--test-editor") testEditor = true;
-        else if (a == "--mute") cfg.mute = true;
+        else if (a == "--mute") { cfg.mute = true; muteForRun = true; }  // this run only, not saved
         else if (a == "--device" && i + 1 < argc) {  // tests: show prompts for this device
             std::string d = argv[++i];
             input.setTestDevice(d == "keyboard" ? Device::Keyboard : Device::Pad,
@@ -333,6 +335,7 @@ int main(int argc, char** argv) {
             if (input.pressed(Act::NextLayout)) { cfg.layout = (cfg.layout + 1) % 3; ui.toast(kLayoutNames[cfg.layout]); }
             if (input.pressed(Act::Mute)) {
                 cfg.mute = !cfg.mute;
+                muteForRun = false;  // the player chose: remember it
                 if (cfg.mute && audio) SDL_ClearQueuedAudio(audio);
                 ui.toast(cfg.mute ? "Sound muted (F3)" : "Sound on (F3)");
             }
@@ -435,8 +438,12 @@ int main(int argc, char** argv) {
     }
 
     emu.flushSave();
-    cfg.save(settingsPath);
-    input.save(bindPath);
+    // Self-tests (and --mute) never change the player's settings or bindings
+    if (!headless) {
+        if (muteForRun) cfg.mute = savedMute;
+        cfg.save(settingsPath);
+        input.save(bindPath);
+    }
     if (audio) SDL_CloseAudioDevice(audio);
     SDL_DestroyRenderer(ren);
     SDL_DestroyWindow(win);
