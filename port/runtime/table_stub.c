@@ -5,3 +5,5 @@ const unsigned g_guest_fn_count = 0;
 const unsigned g_guest_primary_count = 0;
 const GuestRange g_guest_ranges[1] = {{0, 0, 0, 0, 0, 0, 0}};
 const unsigned g_guest_range_count = 0;
+const ResumePoint g_resume_points[1] = {{0, 0}};
+const unsigned g_resume_count = 0;

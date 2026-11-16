@@ -90,24 +90,67 @@ int Emu::readAudio(int16_t* out, int maxFrames) {
     return nds_->SPU.ReadOutput(out, maxFrames);
 }
 
-bool Emu::saveState(const std::string& path) {
-    if (!nds_ || useRecomp_) return false;  // recompiled code keeps state on the host stack
-    Savestate st;
-    if (!nds_->DoSavestate(&st) || st.Error) return false;
-    FILE* f = fopen(path.c_str(), "wb");
-    if (!f) return false;
-    fwrite(st.Buffer(), 1, st.Length(), f);
-    fclose(f);
-    return true;
+// State file: "MSDSST01", then the hardware state (melonDS savestate) and the recompiled code's CPU
+// state, each as u32 length + bytes (the CPU part is empty for states taken in --interp mode).
+bool Emu::canSaveState(std::string* why) const {
+    if (!nds_) { if (why) *why = "no game running"; return false; }
+    return !useRecomp_ || recomp::canSaveState(why);
 }
 
-bool Emu::loadState(const std::string& path) {
-    if (!nds_ || useRecomp_) return false;
+bool Emu::saveState(const std::string& path) {
+    if (!canSaveState()) return false;
+    return writeState(path, useRecomp_ ? recomp::saveState() : std::vector<uint8_t>());
+}
+
+int Emu::saveStateSoon(const std::string& path) {
+    if (useRecomp_) {  // a save requested earlier was taken (or failed) during the last frame
+        int r = recomp::saveAtCallResult();
+        if (r == 1 || r == -1) { recomp::cancelSaveAtCall(); return r; }
+    }
+    if (canSaveState()) { if (useRecomp_) recomp::cancelSaveAtCall(); return saveState(path) ? 1 : -1; }
+    if (!useRecomp_) return -1;
+    if (recomp::saveAtCallResult() != 0) recomp::requestSaveAtCall([this, path](const std::vector<uint8_t>& rt) { return writeState(path, rt); });
+    return 0;
+}
+
+void Emu::cancelSaveStateSoon() {
+    if (useRecomp_) recomp::cancelSaveAtCall();
+}
+
+bool Emu::writeState(const std::string& path, const std::vector<uint8_t>& rt) {
+    Savestate st;
+    if (!nds_->DoSavestate(&st) || st.Error) return false;
+    std::string tmp = path + ".tmp";
+    FILE* f = fopen(tmp.c_str(), "wb");
+    if (!f) return false;
+    uint32_t n1 = st.Length(), n2 = (uint32_t)rt.size();
+    fwrite("MSDSST01", 1, 8, f);
+    fwrite(&n1, 4, 1, f);
+    fwrite(st.Buffer(), 1, n1, f);
+    fwrite(&n2, 4, 1, f);
+    if (n2) fwrite(rt.data(), 1, n2, f);
+    bool ok = fclose(f) == 0;
+    if (ok) { remove(path.c_str()); ok = rename(tmp.c_str(), path.c_str()) == 0; }
+    return ok;
+}
+
+bool Emu::loadState(const std::string& path, std::string* why) {
+    auto fail = [&](const char* w) { if (why) *why = w; return false; };
+    if (!nds_) return fail("no game running");
     auto b = readFile(path);
-    if (b.empty()) return false;
-    Savestate st(b.data(), (u32)b.size(), false);
-    if (st.Error) return false;
-    return nds_->DoSavestate(&st) && !st.Error;
+    if (b.empty()) return fail("no saved state");
+    if (b.size() < 16 || memcmp(b.data(), "MSDSST01", 8) != 0) return fail("not a state of this version");
+    uint32_t n1, n2;
+    memcpy(&n1, &b[8], 4);
+    if (12 + (size_t)n1 + 4 > b.size()) return fail("damaged state file");
+    memcpy(&n2, &b[12 + n1], 4);
+    if (16 + (size_t)n1 + n2 > b.size()) return fail("damaged state file");
+    if (useRecomp_ && n2 == 0) return fail("state was saved in --interp mode");
+    if (!useRecomp_ && n2 != 0) return fail("state was saved by the native build (run without --interp)");
+    Savestate st(&b[12], n1, false);
+    if (st.Error || !nds_->DoSavestate(&st) || st.Error) return fail("could not load the hardware state");
+    if (useRecomp_ && !recomp::loadState(&b[16 + n1], n2)) return fail("could not restore the CPU state");
+    return true;
 }
 
 uint16_t Emu::masterBrightness(int screen) const {

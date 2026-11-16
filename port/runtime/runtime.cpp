@@ -16,6 +16,7 @@
 #include <cstdarg>
 #include <cstdlib>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 #include <string>
 
@@ -79,6 +80,9 @@ constexpr uint32_t kSaveCtxResume = 0x020c3b3cu;  // OS_SaveContext's "return 1"
 constexpr uint32_t kBiosIrqRet = 0xFFFF0280u;
 constexpr uint32_t kRootRet = 0xFFFF0290u;
 constexpr uint32_t kOvrRet = 0xFFFF02A0u;
+constexpr uint32_t kColdReturn = 0xFFFF02B0u;  // fiber entry: continue at lr, as if a leaf call returned
+constexpr uint32_t kColdCall = 0xFFFF02C0u;    // fiber entry: call g_coldCall (state taken at its entry)
+uint32_t g_coldCall = 0;
 
 struct Fiber {
     void* handle = nullptr;
@@ -87,12 +91,28 @@ struct Fiber {
     uint32_t entry = 0;
     std::vector<uint32_t> ss = std::vector<uint32_t>(1 << 16);  // shadow return stack
     uint32_t ssp = 0;
+    uint32_t depth = 0;      // see g_depth
+    bool savedAtRoot = true; // parked by OS_SaveContext with no runtime frame below (save states)
 };
 
 void* g_hostFiber = nullptr;
 std::vector<Fiber*> g_fibers;
 Fiber* g_cur = nullptr;
 std::unordered_map<uint32_t, Fiber*> g_parkedBySp;  // guest SP saved by OS_SaveContext -> fiber
+std::unordered_set<Fiber*> g_tokenParked;  // threads switched out by an IRQ (resumable only on their own fiber)
+std::unordered_map<uint32_t, Fiber*> g_byToken;
+uint32_t g_nextFiberId = 0;
+// Save states: how a thread switched out by an IRQ can be restarted without its fiber.
+// 0: it cannot; kColdReturn: it waited in a leaf `wait for interrupt` call (continue at lr);
+// otherwise the entry (| Thumb bit) of the function it was about to run (call it again).
+uint32_t g_yieldPark = 0;        // for the yield in progress
+// Nested callExpect frames of the current thread. 1 = only its root: everything else on its host
+// stack is generated code, which a save state can rebuild from return sites. Deeper means a runtime
+// frame (IRQ, override, interpreter) is in the middle of something a save state cannot capture.
+uint32_t g_depth = 0;
+std::unordered_map<Fiber*, uint32_t> g_parkHow;           // token-parked fiber -> how (see above)
+std::unordered_map<uint32_t, uint32_t> g_coldTokens;      // after a load: token -> how
+bool g_haltWfi = false;  // the current thread waits in a leaf `wait for interrupt` (CP15) call
 
 void runAt(uint32_t pc);
 
@@ -104,8 +124,9 @@ void WINAPI fiberMain(void* arg) {
 
 Fiber* newFiber(uint32_t entry) {
     Fiber* f = new Fiber();
-    f->id = (uint32_t)g_fibers.size();
+    f->id = g_nextFiberId++;
     f->token = kTokenBase + f->id * 0x10;
+    g_byToken[f->token] = f;
     f->entry = entry;
     f->handle = CreateFiberEx(64 * 1024, 64 * 1024 * 1024, FIBER_FLAG_FLOAT_SWITCH, fiberMain, f);
     if (!f->handle) fatal("CreateFiberEx failed");
@@ -119,13 +140,16 @@ void switchTo(Fiber* f) {
     g_stats.threadSwitches++;
     Fiber* prev = g_cur;
     prev->ssp = C.ssp;
+    prev->depth = g_depth;
     g_cur = f;
     C.ss = f->ss.data();
     C.ssp = f->ssp;
+    g_depth = f->depth;
     SwitchToFiber(f->handle);
     // resumed: g_cur was set back to prev by whoever switched to us
     C.ss = prev->ss.data();
     C.ssp = prev->ssp;
+    g_depth = prev->depth;
 }
 
 // ------------------------------------------------------------------ CPSR / banking
@@ -192,6 +216,33 @@ GuestFn lookup(uint32_t addr) {
         if (matches(e)) { cs.last = e; return e->fn; }
     }
     return nullptr;
+}
+
+// Return sites -> owning functions (g_resume_points): threads restored from a save state continue
+// there natively (the function is entered with c->resume set and jumps to the site).
+std::unordered_map<uint32_t, std::vector<const GuestFnEntry*>> g_resumeMap;
+
+const GuestFnEntry* resumeOwner(uint32_t site) {
+    auto it = g_resumeMap.find(site);
+    if (it == g_resumeMap.end()) return nullptr;
+    for (const GuestFnEntry* e : it->second) {
+        if (e->overlay < 0) return e;
+        const uint8_t* ram = e->addr < C.itcm_size ? g_arm9->ITCM + (e->addr & (ITCMPhysicalSize - 1))
+                                                   : C.main_ram + (e->addr & C.main_ram_mask);
+        if (e->body ? memcmp(ram, e->body, e->body_len) == 0
+                    : mem_read32(&C, e->addr) == e->sig[0] && mem_read32(&C, e->addr + 4) == e->sig[1])
+            return e;
+    }
+    return nullptr;
+}
+
+bool resumeAt(uint32_t site) {
+    const GuestFnEntry* e = resumeOwner(site & ~1u);
+    if (!e) return false;
+    C.resume = site & ~1u;
+    e->fn(&C);
+    C.resume = 0;
+    return true;
 }
 
 void callExpect(uint32_t target, uint32_t expected);
@@ -319,6 +370,8 @@ void callAt(uint32_t target) {
     g_recentCalls[g_recentPos++ & 63] = target;
     GuestFn fn = lookup(target);
     if (fn) { fn(&C); return; }
+    // a return site (e.g. a thread resumed from a save state, or setjmp's return after longjmp)
+    if (resumeAt(target)) return;
     // jump into the middle of hand-written assembly: use the owning function's multi-entry variant
     for (unsigned i = 0; i < g_guest_range_count; i++) {
         const GuestRange& r = g_guest_ranges[i];
@@ -355,11 +408,13 @@ void callAt(uint32_t target) {
 // executed as continuations, like the resolver blocks in generated code.
 void callExpect(uint32_t target, uint32_t expected) {
     C.ss[C.ssp++] = expected;
+    g_depth++;
     callAt(target);
     while (C.ret != expected) {
         if (rt_in_stack(&C, C.ret)) fatal("unwinding through runtime frame (ret %08x, expected %08x)", C.ret, expected);
         callAt(C.ret);
     }
+    g_depth--;
     C.ssp--;
 }
 
@@ -368,21 +423,42 @@ void runAt(uint32_t pc) {
     // simply continues as a call, and that function never returns.
     C.ss = g_cur->ss.data();
     C.ssp = 0;
+    // Threads restored from a save state have no host frames: continue at their return address and
+    // let the root loop below resume each caller in turn (return sites, see resumeAt).
+    if (pc == kSaveCtxResume) {      // parked in OS_SaveContext: it "returns 1" to its caller
+        C.r[0] = 1;
+        pc = C.r[14];
+    } else if (pc == kColdReturn) {  // halted in a leaf call: return from it
+        pc = C.r[14];
+    } else if (pc == kColdCall) {    // saved at a function's entry: call it again
+        pc = g_coldCall;
+    }
     callExpect(pc, kRootRet);
     fatal("guest thread root function at %08x returned", pc);
 }
 
 // Transfer control to guest PC `pc` after a context switch.
 void transferTo(uint32_t pc) {
-    if (pc >= kTokenBase && pc < kTokenBase + 0x10 * (uint32_t)g_fibers.size() && (pc & 0xF) == 0) {
-        switchTo(g_fibers[(pc - kTokenBase) / 0x10]);
+    if (pc >= kTokenBase && (pc & 0xF) == 0) {
+        auto it = g_byToken.find(pc);
+        if (it != g_byToken.end()) {
+            g_tokenParked.erase(it->second);
+            g_parkHow.erase(it->second);
+            switchTo(it->second);
+            return;
+        }
+        // switched out by an IRQ before a save state was loaded: restart it on a new fiber
+        auto ct = g_coldTokens.find(pc);
+        if (ct == g_coldTokens.end()) fatal("resuming unknown interrupted thread %08x", pc);
+        uint32_t how = ct->second;
+        g_coldTokens.erase(ct);
+        switchTo(newFiber(how));
         return;
     }
     if (pc == kSaveCtxResume) {
         auto it = g_parkedBySp.find(C.r[13]);
-        if (it == g_parkedBySp.end()) fatal("context resume with unknown stack %08x", C.r[13]);
-        switchTo(it->second);
-        return;
+        if (it != g_parkedBySp.end()) { switchTo(it->second); return; }
+        // a thread parked before a save state was loaded: start a fiber that resumes it
     }
     switchTo(newFiber(pc));
 }
@@ -391,6 +467,11 @@ void transferTo(uint32_t pc) {
 void doIrq() {
     uint32_t cpsr = rt_cpsr_read(&C);
     Fiber* me = g_cur;
+    // how this thread can be restarted if the handler switches it out (save states)
+    uint32_t how = g_yieldPark;
+    g_yieldPark = 0;
+    const uint32_t mode0 = C.cpsr & 0x1F;
+    if (how && (g_depth != 1 || (mode0 != 0x1F && mode0 != 0x10) || !resumeOwner(C.r[14] & ~1u))) how = 0;
     uint32_t old = C.cpsr;
     switchMode(old & 0x1F, 0x12);
     C.cpsr = (cpsr & ~0xFFu) | 0x92;  // IRQ mode, IRQs disabled, ARM state
@@ -424,7 +505,11 @@ void doIrq() {
     C.r[13] = sp + 24;
     uint32_t pc = C.r[14] - 4;
     loadPsr(C.spsr);
-    if (pc != me->token) transferTo(pc);  // the OS switched threads inside the handler
+    if (pc != me->token) {  // the OS switched threads inside the handler
+        g_tokenParked.insert(me);
+        if (how) g_parkHow[me] = how;
+        transferTo(pc);
+    }
 }
 
 void maybeIrq() {
@@ -449,16 +534,41 @@ void externalExecute(ARMv5* cpu) {
 
 }  // namespace
 
+namespace recomp { bool saveAtCallPending(); void takeSaveAtCall(uint32_t fn); }
+
 // ================================================================== C ABI used by generated code
 extern "C" {
 
 void rt_yield(Cpu* c) {
+    // A save state is pending: keep target 0 so that every function entry checks for a moment to
+    // save (rt_yield_entry), and take IRQs only at function entries, where a thread switched out by
+    // one can be restarted from a save state.
+    const bool pending = recomp::saveAtCallPending();
+    if (pending && !g_halted && c->cycles < (int64_t)g_nds->ARM9Target) {
+        c->target = 0;
+        if (g_yieldPark) maybeIrq();
+        return;
+    }
     g_stats.yields++;
     g_nds->ARM9Timestamp = (u64)c->cycles;
     SwitchToFiber(g_hostFiber);
     c->cycles = (int64_t)g_nds->ARM9Timestamp;
     c->target = (int64_t)g_nds->ARM9Target;
+    if (recomp::saveAtCallPending()) {
+        c->target = 0;
+        if (!g_yieldPark) return;
+    }
     maybeIrq();
+}
+
+static bool trySaveAtEntry(Cpu* c, uint32_t fn);
+
+void rt_yield_entry(Cpu* c, uint32_t fn) {
+    if (recomp::saveAtCallPending() && trySaveAtEntry(c, fn | c->TB)) return;
+    uint32_t prev = g_yieldPark;
+    g_yieldPark = fn | c->TB;
+    rt_yield(c);
+    g_yieldPark = prev;
 }
 
 static inline void afterIo(Cpu* c) {
@@ -563,11 +673,47 @@ void rt_msr_cpsr(Cpu* c, uint32_t val, uint32_t mask) {
 
 uint32_t rt_cp15_read(Cpu*, uint32_t id) { return g_arm9->CP15Read(id); }
 
+// Called at the entry of OS_WaitVBlankIntr (see testhooks.cpp): take a pending save state here
+// if every other thread is parked and this one can be resumed by calling the function again.
+void rt_safe_call_point(Cpu* c, uint32_t fn) {
+    if (recomp::saveAtCallPending()) trySaveAtEntry(c, fn | 1);
+}
+
+// Every other thread can be restarted from guest memory after a load.
+static bool othersRestartable() {
+    if (g_parkHow.size() != g_tokenParked.size()) return false;
+    for (auto& [sp, f] : g_parkedBySp)
+        if (f != g_cur && !f->savedAtRoot) return false;
+    return true;
+}
+
+// At the entry of `fn` (| Thumb bit), before it has run anything: save here if calling it again
+// after a load continues exactly like this thread does now.
+static bool trySaveAtEntry(Cpu* c, uint32_t fn) {
+    const uint32_t mode = c->cpsr & 0x1F;
+    const bool ok = g_depth == 1 && !g_halted && (mode == 0x1F || mode == 0x10) && othersRestartable() &&
+                    lookup(fn & ~1u) && resumeOwner(c->r[14] & ~1u);
+    if (!ok) {
+        static int n = 0;
+        if (getenv("MSDS_STATE_LOG") && n++ % 5000 == 0)
+            logf("[state] not at %08x: depth %u, mode %02x, IRQ-parked unrestartable %zu, lr %08x resumable %d\n", fn,
+                 g_depth, mode, g_tokenParked.size() - g_parkHow.size(), c->r[14], resumeOwner(c->r[14] & ~1u) != nullptr);
+        return false;
+    }
+    g_nds->ARM9Timestamp = (u64)c->cycles;
+    recomp::takeSaveAtCall(fn);
+    c->target = (int64_t)g_nds->ARM9Target;
+    return true;
+}
+
 void rt_cp15_write(Cpu* c, uint32_t id, uint32_t val, uint32_t) {
     if (id == 0x704 || id == 0x782) {  // wait for interrupt
         g_halted = true;
         g_stats.halts++;
-        while (g_halted) rt_yield(c);
+        g_haltWfi = true;
+        while (g_halted) { g_yieldPark = kColdReturn; rt_yield(c); }
+        g_yieldPark = 0;
+        g_haltWfi = false;
         return;
     }
     g_arm9->CP15Write(id, val);
@@ -631,6 +777,7 @@ void ovr_OS_SaveContext(Cpu* c) {
     f_ram_020c3af8(c);
     uint32_t savedSp = mem_read32(c, ctx + 4 + 13 * 4);
     g_parkedBySp[savedSp] = g_cur;
+    g_cur->savedAtRoot = g_depth == 1;
 }
 
 void ovr_OS_LoadContext(Cpu* c) {
@@ -885,6 +1032,8 @@ void attach(NDS* nds, uint32_t entry) {
     if (!g_log) g_log = fopen("recomp.log", "w");
     g_fnmap.clear();
     for (unsigned i = 0; i < g_guest_fn_count; i++) g_fnmap[g_guest_fns[i].addr].e.push_back(&g_guest_fns[i]);
+    g_resumeMap.clear();
+    for (unsigned i = 0; i < g_resume_count; i++) g_resumeMap[g_resume_points[i].addr].push_back(&g_guest_fns[g_resume_points[i].fn]);
     memcpy(C.r, g_arm9->R, sizeof C.r);
     C.cpsr = g_arm9->CPSR;
     setFlagsFrom(C.cpsr);
@@ -900,7 +1049,15 @@ void attach(NDS* nds, uint32_t entry) {
     for (Fiber* f : g_fibers) { DeleteFiber(f->handle); delete f; }
     g_fibers.clear();
     g_parkedBySp.clear();
+    g_tokenParked.clear();
+    g_byToken.clear();
+    g_parkHow.clear();
+    g_coldTokens.clear();
+    g_nextFiberId = 0;
+    g_yieldPark = 0;
+    g_depth = 0;
     g_halted = false;
+    g_haltWfi = false;
     g_cur = newFiber(entry);
     C.ss = g_cur->ss.data();
     C.ssp = 0;
@@ -915,6 +1072,125 @@ void detach() {
 }
 
 bool active() { return g_active; }
+
+namespace {
+std::function<bool(const std::vector<uint8_t>&)> g_saveWriter;
+int g_saveResult = -2;
+}
+void requestSaveAtCall(std::function<bool(const std::vector<uint8_t>&)> write) { g_saveWriter = std::move(write); g_saveResult = 0; }
+int saveAtCallResult() { return g_saveResult; }
+bool saveAtCallPending() { return g_saveWriter && g_saveResult == 0; }
+void takeSaveAtCall(uint32_t fn) {
+    std::vector<uint8_t> rt = saveState();
+    uint32_t kind = 1, target = fn;      // entry | Thumb bit
+    memcpy(rt.data() + 8, &kind, 4);     // StateBlock.kind / .target follow magic and version
+    memcpy(rt.data() + 12, &target, 4);
+    g_saveResult = g_saveWriter(rt) ? 1 : -1;
+    g_saveWriter = nullptr;
+}
+void cancelSaveAtCall() { g_saveWriter = nullptr; g_saveResult = -2; }
+std::vector<uint8_t> saveState();
+
+// ---------------------------------------------------------------- save states
+namespace {
+struct StateBlock {
+    char magic[4];
+    uint32_t version;
+    uint32_t kind;    // 0: halted in a leaf call (continue at lr); 1: at the entry of `target`
+    uint32_t target;
+    uint32_t r[16];
+    uint8_t NG, ZR, CY, OV, Q, TB, halted, pad;
+    uint32_t cpsr, spsr;
+    uint32_t bankR13[6], bankR14[6], bankSpsr[6];
+};
+}
+
+bool canSaveState(std::string* why) {
+    auto no = [&](const char* w) { if (why) *why = w; return false; };
+    if (!g_active || !g_cur) return no("native code not running");
+    if (!g_halted || !g_haltWfi) return no("the game is busy (not waiting for the next frame)");
+    if (g_depth != 1 || !othersRestartable()) return no("a thread was interrupted mid-work");
+    const uint32_t mode = C.cpsr & 0x1F;
+    if (mode != 0x1F && mode != 0x10) return no("an interrupt is being handled");
+    if (!resumeOwner(C.r[14] & ~1u)) return no("the waiting thread cannot be resumed");
+    return true;
+}
+
+std::vector<uint8_t> saveState() {
+    StateBlock b{};
+    memcpy(b.magic, "MSRT", 4);
+    b.version = 3;
+    memcpy(b.r, C.r, sizeof b.r);
+    b.NG = C.NG; b.ZR = C.ZR; b.CY = C.CY; b.OV = C.OV; b.Q = C.Q; b.TB = C.TB;
+    b.halted = g_halted;
+    b.cpsr = C.cpsr; b.spsr = C.spsr;
+    memcpy(b.bankR13, g_bankR13, sizeof b.bankR13);
+    memcpy(b.bankR14, g_bankR14, sizeof b.bankR14);
+    memcpy(b.bankSpsr, g_bankSpsr, sizeof b.bankSpsr);
+    // then: count, {token, how} of each thread switched out by an IRQ (see g_parkHow)
+    std::vector<uint32_t> parked;
+    for (auto& [f, how] : g_parkHow) { parked.push_back(f->token); parked.push_back(how); }
+    for (auto& [tok, how] : g_coldTokens) { parked.push_back(tok); parked.push_back(how); }
+    uint32_t n = (uint32_t)parked.size() / 2;
+    logf("[rt] state saved: %s, lr %08x, %u interrupted thread(s), cycles %lld\n", g_halted ? "halted" : "at a call",
+         C.r[14], n, (long long)C.cycles);
+    std::vector<uint8_t> out(sizeof b + 4 + parked.size() * 4);
+    memcpy(out.data(), &b, sizeof b);
+    memcpy(out.data() + sizeof b, &n, 4);
+    if (n) memcpy(out.data() + sizeof b + 4, parked.data(), parked.size() * 4);
+    return out;
+}
+
+bool loadState(const uint8_t* data, size_t len) {
+    StateBlock b;
+    if (len < sizeof b + 4) return false;
+    memcpy(&b, data, sizeof b);
+    if (memcmp(b.magic, "MSRT", 4) != 0 || b.version != 3) return false;
+    uint32_t n;
+    memcpy(&n, data + sizeof b, 4);
+    if (len != sizeof b + 4 + (size_t)n * 8) return false;
+    // Drop every fiber: the threads are rebuilt from guest memory as the game switches to them
+    // (OS_LoadContext of a parked thread starts a fiber that resumes it, see transferTo/runAt).
+    for (Fiber* f : g_fibers) { DeleteFiber(f->handle); delete f; }
+    g_fibers.clear();
+    g_parkedBySp.clear();
+    g_tokenParked.clear();
+    g_byToken.clear();
+    g_parkHow.clear();
+    g_coldTokens.clear();
+    g_yieldPark = 0;
+    g_depth = 0;
+    // threads switched out by an IRQ restart from their entry; new fibers get fresh tokens
+    uint32_t maxId = 0;
+    for (uint32_t i = 0; i < n; i++) {
+        uint32_t tok, how;
+        memcpy(&tok, data + sizeof b + 4 + i * 8, 4);
+        memcpy(&how, data + sizeof b + 8 + i * 8, 4);
+        g_coldTokens[tok] = how;
+        maxId = std::max(maxId, (tok - kTokenBase) / 0x10 + 1);
+    }
+    g_nextFiberId = maxId;
+    memcpy(C.r, b.r, sizeof C.r);
+    C.NG = b.NG; C.ZR = b.ZR; C.CY = b.CY; C.OV = b.OV; C.Q = b.Q; C.TB = b.TB;
+    C.cpsr = b.cpsr; C.spsr = b.spsr;
+    memcpy(g_bankR13, b.bankR13, sizeof g_bankR13);
+    memcpy(g_bankR14, b.bankR14, sizeof g_bankR14);
+    memcpy(g_bankSpsr, b.bankSpsr, sizeof g_bankSpsr);
+    refreshTcm();
+    C.cycles = (int64_t)g_nds->ARM9Timestamp;
+    C.target = (int64_t)g_nds->ARM9Target;
+    C.resume = 0;
+    // the saved thread either waited for an interrupt in a leaf call (it continues by returning
+    // from it) or was about to call `target` (it calls it again)
+    g_halted = b.halted;
+    g_haltWfi = false;
+    g_coldCall = b.target;
+    g_cur = newFiber(b.kind == 1 ? kColdCall : kColdReturn);
+    C.ss = g_cur->ss.data();
+    C.ssp = 0;
+    logf("[rt] state loaded: resuming at %08x (sp %08x)\n", C.r[14], C.r[13]);
+    return true;
+}
 
 void dumpStats() {
     logf("[rt] interpreted instructions: %llu\n", (unsigned long long)g_interpSteps);

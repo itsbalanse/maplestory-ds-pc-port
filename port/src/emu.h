@@ -29,8 +29,15 @@ public:
     int audioAvailable() const;
     static constexpr int kSampleRate = 48000;
 
+    // Save states. In the native build a state can only be taken at a safe moment between frames
+    // (see recomp::canSaveState): callers retry for a few frames while canSaveState() is false.
+    bool canSaveState(std::string* why = nullptr) const;
     bool saveState(const std::string& path);
-    bool loadState(const std::string& path);
+    // Native build: save now if possible, otherwise at the next safe point inside the next frames
+    // (busy scenes). Call once per frame: 1 saved, 0 not yet, -1 failed.
+    int saveStateSoon(const std::string& path);
+    void cancelSaveStateSoon();
+    bool loadState(const std::string& path, std::string* why = nullptr);
 
     // Debug: write both 2D engines' VRAM views, palettes, OAM and registers (tools/gpudump.py)
     bool dumpGpu(const std::string& path) const;
@@ -46,6 +53,7 @@ public:
     bool recompiled() const { return useRecomp_; }
 
 private:
+    bool writeState(const std::string& path, const std::vector<uint8_t>& rt);
     std::unique_ptr<melonDS::NDS> nds_;
     bool useRecomp_ = false;
     std::string romPath_, savPath_;

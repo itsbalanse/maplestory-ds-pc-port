@@ -151,7 +151,8 @@ void enableInterpLua() {
 }
 
 extern "C" void ovr_WaitVBlankIntr(Cpu* c) {
-    if (!g_queue.empty() && !g_busy && f_ram_020aefe0) {
+    if (!c->resume) rt_safe_call_point(c, 0x020c4f74u);  // save states in busy scenes
+    if (!g_queue.empty() && !g_busy && f_ram_020aefe0 && !c->resume) {  // resume: see save states
         g_busy = true;
         const uint32_t lr = c->r[14], r0 = c->r[0], r1 = c->r[1], r2 = c->r[2], r3 = c->r[3];
         while (!g_queue.empty()) {

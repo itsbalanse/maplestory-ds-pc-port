@@ -222,6 +222,23 @@ int main(int argc, char** argv) {
     }
     const bool headless = testFrames > 0 || !testScriptPath.empty();
     script.luaPending = [] { return recomp::luaPending(); };
+    script.saveState = [&emu](const std::string& name) -> int {
+        static int tries = 0;
+        int r = emu.saveStateSoon(name + ".state");
+        if (r == 0 && ++tries % 120 == 0) {
+            std::string why;
+            emu.canSaveState(&why);
+            fprintf(stderr, "test script: cannot save yet: %s\n", why.c_str());
+        }
+        if (r != 0) tries = 0;
+        return r;
+    };
+    script.loadState = [&emu](const std::string& name) {
+        std::string why;
+        bool ok = emu.loadState(name + ".state", &why);
+        if (!ok) fprintf(stderr, "test script: loadstate %s failed: %s\n", name.c_str(), why.c_str());
+        return ok;
+    };
     script.pixel = [&emu](int x, int y) -> uint32_t {
         if (x < 0 || x > 255 || y < 0 || y > 383) return 0;
         const uint32_t* scr = emu.screen(y >= 192 ? 1 : 0);
@@ -256,6 +273,7 @@ int main(int argc, char** argv) {
     std::vector<int16_t> abuf(8192 * 2);
     Uint64 freq = SDL_GetPerformanceFrequency(), next = SDL_GetPerformanceCounter();
     bool running = true, paused = false;
+    int pendingSave = 0;  // frames left to find a moment where a state can be saved
     int exitCode = 0;
     bool touching = false;
     int tx = 0, ty = 0;
@@ -349,10 +367,12 @@ int main(int argc, char** argv) {
                 ui.toast(cfg.pcPrompts ? "Showing your keys and buttons (F4)" : "Showing the original DS buttons (F4)");
             }
             if (input.pressed(Act::Pause)) { paused = !paused; ui.toast(paused ? "Paused" : "Resumed"); }
-            if (input.pressed(Act::QuickSave))
-                ui.toast(emu.recompiled() ? "Save states need --interp mode (use the in-game save)" : emu.saveState(statePath) ? "State saved" : "Could not save state");
-            if (input.pressed(Act::QuickLoad))
-                ui.toast(emu.recompiled() ? "Save states need --interp mode (use the in-game save)" : emu.loadState(statePath) ? "State loaded" : "No saved state");
+            // the native build saves at the next safe moment between frames (usually the next frame)
+            if (input.pressed(Act::QuickSave)) pendingSave = 180;
+            if (input.pressed(Act::QuickLoad)) {
+                std::string why;
+                ui.toast(emu.loadState(statePath, &why) ? "State loaded (F9)" : "Could not load state: " + why);
+            }
             if (input.pressed(Act::Screenshot)) {
                 fs::create_directories(fs::u8path(base + "screenshots"));
                 char name[64];
@@ -360,6 +380,19 @@ int main(int argc, char** argv) {
                 std::strftime(name, sizeof name, "screenshots/%Y%m%d_%H%M%S.bmp", std::localtime(&t));
                 saveFrame(base + name);
                 ui.toast(std::string("Saved ") + name);
+            }
+        }
+
+        if (pendingSave > 0) {
+            int r = emu.saveStateSoon(statePath);
+            if (r != 0) {
+                ui.toast(r > 0 ? "State saved (F5)" : "Could not save state");
+                pendingSave = 0;
+            } else if (--pendingSave == 0) {
+                std::string why;
+                emu.canSaveState(&why);
+                emu.cancelSaveStateSoon();
+                ui.toast("Could not save here: " + why);
             }
         }
 

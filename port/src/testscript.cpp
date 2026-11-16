@@ -70,7 +70,18 @@ void TestScript::frame(uint32_t& keyMask, bool& touching, int& tx, int& ty, std:
             pc_ = cmds_.size();
         }
     }
-    if (luaWaitLeft_ > 0) {
+    if (saveLeft_ > 0) {
+        int r = saveState ? saveState(saveName_) : -1;
+        if (r == 1) {
+            saveLeft_ = 0;
+        } else if (r < 0 || --saveLeft_ == 0) {
+            saveLeft_ = 0;
+            failed_ = true;
+            fprintf(stderr, "test script: savestate %s failed\n", saveName_.c_str());
+            pc_ = cmds_.size();
+        }
+    }
+    if (saveLeft_ > 0 || luaWaitLeft_ > 0) {
         // keep waiting
     } else if (waitingPixel_ && pulseLeft_ == 0 && releaseLeft_ == 0) {
         // keep waiting
@@ -99,6 +110,11 @@ void TestScript::frame(uint32_t& keyMask, bool& touching, int& tx, int& ty, std:
             if (c.op == "rawshot" && !c.args.empty()) { shots.push_back("raw:" + c.args[0]); continue; }
             if (c.op == "lua" && !c.rest.empty()) { shots.push_back("lua:" + c.rest); continue; }
             if (c.op == "luawait") { luaWaitLeft_ = arg(0, 1800); break; }
+            if (c.op == "savestate" && !c.args.empty()) { saveName_ = c.args[0]; saveLeft_ = arg(1, 600); break; }
+            if (c.op == "loadstate" && !c.args.empty()) {
+                if (!loadState || !loadState(c.args[0])) { failed_ = true; pc_ = cmds_.size(); }
+                break;
+            }
             if (c.op == "ramdump" && !c.args.empty()) { shots.push_back("ram:" + c.args[0]); continue; }
             if ((c.op == "until" && c.args.size() >= 3) || (c.op == "pressuntil" && c.args.size() >= 4)) {
                 size_t o = c.op == "until" ? 0 : 1;

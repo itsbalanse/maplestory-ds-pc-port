@@ -27,6 +27,7 @@ typedef struct Cpu {
     void* rt;                // runtime private
     uint32_t* ss;            // shadow stack of expected return addresses (per guest thread)
     uint32_t ssp;
+    uint32_t resume;         // nonzero: the called function continues at this return site (save states)
 } Cpu;
 
 // debug write watchpoint (MSDS_WATCH=addr[:len]); g_watch_len is 0 when disabled
@@ -52,6 +53,7 @@ void rt_write16(Cpu*, uint32_t, uint16_t);
 void rt_write32(Cpu*, uint32_t, uint32_t);
 
 void rt_yield(Cpu*);                                  // cycles >= target: let hardware catch up, take IRQs
+void rt_yield_entry(Cpu*, uint32_t fn);               // the same, at the entry of function fn
 void rt_call(Cpu*, uint32_t target);                  // indirect call through the dispatcher
 int rt_in_stack(Cpu*, uint32_t addr);                 // is addr an expected return of an outer frame?
 uint32_t rt_get_user(Cpu*, uint32_t n);               // user-bank register (LDM/STM ^)
@@ -63,6 +65,7 @@ void rt_cpsr_written(Cpu*, uint32_t old_cpsr);
 uint32_t rt_cpsr_read(Cpu*);
 void rt_spsr_restore(Cpu*);                           // exception return (CPSR = SPSR)
 void rt_missing(Cpu*, uint32_t at, const char* why);
+void rt_safe_call_point(Cpu*, uint32_t fn);          // save states: see runtime.cpp
 
 // ---------------------------------------------------------------- memory fast paths
 static inline int in_itcm(Cpu* c, uint32_t a) { return a < c->itcm_size; }
@@ -98,6 +101,8 @@ static inline uint32_t clz32(uint32_t v) { return v ? (uint32_t)__builtin_clz(v)
 
 #define CYC(n) (c->cycles += (n))  /* ~1 ARM9 cycle per instruction */
 #define CHECK() do { if (__builtin_expect(c->cycles >= c->target, 0)) rt_yield(c); } while (0)
+/* at a function's entry: a thread interrupted here can be restarted by calling the function again */
+#define CHECK_ENTRY(fn) do { if (__builtin_expect(c->cycles >= c->target, 0)) rt_yield_entry(c, fn); } while (0)
 
 #ifdef __cplusplus
 }

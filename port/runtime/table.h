@@ -11,7 +11,7 @@ typedef struct GuestFnEntry {
     int thumb;
     GuestFn fn;
     uint32_t sig[2]; // first 8 code bytes, to check which overlay is resident
-    const uint8_t* body;  // overlay functions: original code bytes (up to 256) for an exact check
+    const uint8_t* body;  // overlay functions: the function's original code, to check which overlay is resident
     uint32_t body_len;
 } GuestFnEntry;
 
@@ -24,6 +24,16 @@ typedef struct GuestRange {
     const uint8_t* body;   // entry code bytes, to check which image is resident
     uint32_t body_len;
 } GuestRange;
+
+// A return site inside a function (the instruction after a call): threads restored from a save
+// state continue there by calling the function with c->resume set to the site.
+typedef struct ResumePoint {
+    uint32_t addr;
+    uint32_t fn;  // index into g_guest_fns
+} ResumePoint;
+
+extern const ResumePoint g_resume_points[];
+extern const unsigned g_resume_count;
 
 extern const GuestRange g_guest_ranges[];
 extern const unsigned g_guest_range_count;

@@ -42,7 +42,7 @@ def stage_items(classes):
     return items
 
 
-def script_for(items):
+def script_for(items, states=False):
     out = ['pressuntil A 5 183 513820 4000', 'wait 60']
     for stage, c in items:
         tag = '%s_%d' % (stage, c)
@@ -53,6 +53,9 @@ def script_for(items):
         out += ['shot %s_b' % tag, 'hold RIGHT', 'wait 90', 'release RIGHT', 'press B', 'wait 30',
                 'hold LEFT', 'wait 90', 'release LEFT', 'shot %s_c' % tag,
                 "lua Trace('sweep %s')" % tag, 'luawait 2400']
+        if states:  # save, play on, load, play the same again: the game must keep running after the load
+            out += ['savestate st', 'wait 120', 'shot %s_d' % tag, 'loadstate st', 'wait 120', 'shot %s_e' % tag,
+                    "lua Trace('state %s')" % tag, 'luawait 2400']
     return '\n'.join(out) + '\n'
 
 
@@ -65,7 +68,7 @@ def black_fraction(path):
     return sum(1 for v in px if v < 12) / (256 * 192)
 
 
-def run_worker(wid, items, outdir, save, log, exe=EXE, interp=False):
+def run_worker(wid, items, outdir, save, log, exe=EXE, interp=False, states=False):
     wdir = os.path.join(outdir, 'w%02d' % wid)
     os.makedirs(wdir, exist_ok=True)
     results = {}
@@ -74,7 +77,7 @@ def run_worker(wid, items, outdir, save, log, exe=EXE, interp=False):
     while todo:
         attempt += 1
         shutil.copy(save, os.path.join(wdir, 'run.sav'))
-        open(os.path.join(wdir, 'sweep.txt'), 'w').write(script_for(todo))
+        open(os.path.join(wdir, 'sweep.txt'), 'w').write(script_for(todo, states))
         t0 = time.time()
         cmd = [exe] + (['--interp'] if interp else []) + ['--test-script', 'sweep.txt', '--test-save', 'run.sav', ROM]
         p = subprocess.run(cmd,
@@ -86,7 +89,7 @@ def run_worker(wid, items, outdir, save, log, exe=EXE, interp=False):
             rlog = open(os.path.join(wdir, 'recomp.log'), errors='replace').read()
             shutil.copy(os.path.join(wdir, 'recomp.log'), os.path.join(wdir, 'recomp%d.log' % attempt))
         warped = re.findall(r"\[lua\] ok: ChangeStage\('(MP\d+)'\)", text)
-        probes = re.findall(r"\[lua\] ok: Trace\('sweep (MP\d+)_(\d)'\)", text)
+        probes = re.findall(r"\[lua\] ok: Trace\('%s (MP\d+)_(\d)'\)" % ('state' if states else 'sweep'), text)
         done = {(s, int(c)) for s, c in probes}
         misses = re.findall(r'no recompiled code at ([0-9a-f]+)', text + rlog)
         failed_at = None
@@ -99,7 +102,11 @@ def run_worker(wid, items, outdir, save, log, exe=EXE, interp=False):
         if failed_at is None:
             break
         reason = 'exit %d' % p.returncode
-        if 'queued Lua did not run' in text:
+        if 'savestate st failed' in text:
+            reason = 'could not save a state'
+        elif 'loadstate st failed' in text:
+            reason = 'could not load the state'
+        elif 'queued Lua did not run' in text:
             reason = 'hang (frame loop stopped)'
         elif 'fatal' in text.lower() or p.returncode not in (0, 2):
             reason = 'crash: ' + (re.findall(r'.*fatal.*', text, re.I) or ['exit %d' % p.returncode])[-1][:200]
@@ -130,6 +137,7 @@ def main():
     ap.add_argument('--classes', default='0123')
     ap.add_argument('--exe', default=EXE)
     ap.add_argument('--interp', action='store_true')
+    ap.add_argument('--states', action='store_true', help='also save and load a state in every run')
     ap.add_argument('--from-results', default='')
     a = ap.parse_args()
     os.makedirs(a.outdir, exist_ok=True)
@@ -150,7 +158,7 @@ def main():
     chunks = [items[i::a.workers] for i in range(a.workers)]
     results = {}
     with cf.ThreadPoolExecutor(a.workers) as ex:
-        futs = [ex.submit(run_worker, i, ch, a.outdir, a.save, log, a.exe, a.interp) for i, ch in enumerate(chunks) if ch]
+        futs = [ex.submit(run_worker, i, ch, a.outdir, a.save, log, a.exe, a.interp, a.states) for i, ch in enumerate(chunks) if ch]
         for f in cf.as_completed(futs):
             results.update(f.result())
     json.dump(results, open(os.path.join(a.outdir, 'results.json'), 'w'), indent=1, sort_keys=True)

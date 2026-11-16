@@ -43,7 +43,7 @@ void setTagReplacements(TagReplacements r) { g_repl = std::move(r); }
 
 extern "C" void ovr_ExpandTags(Cpu* c) {
     const uint32_t str = c->r[0], flag = c->r[1], lr = c->r[14], sp = c->r[13];
-    if (!g_repl.empty()) {
+    if (!g_repl.empty() && !c->resume) {  // resume: continuing inside the original (save states)
         // scratch: [obj 16][pattern 0x60][replacement 0x100], kept below the live stack
         const uint32_t base = (sp - 0x180) & ~7u, obj = base, pat = base + 0x10, rep = base + 0x70;
         c->r[13] = base - 0x10;
