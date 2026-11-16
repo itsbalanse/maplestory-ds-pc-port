@@ -6,7 +6,13 @@
 #include <vector>
 
 #include "promptfont.inc"
+// The templates are cut from the game's graphics, so they are not distributed with the source:
+// tools/prompt_templates.py makes them. Without them the HUD keeps the DS icons (text prompts still work).
+#if __has_include("prompt_templates.inc")
 #include "prompt_templates.inc"
+#else
+#include "prompt_templates_none.inc"
+#endif
 
 namespace hudprompts {
 namespace {

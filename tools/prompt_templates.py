@@ -9,7 +9,9 @@ player's bindings. Each template is cut from
   cell:ENTRY:N  OBJ cell N of a cell set of the English ROM, rect in the cell's own (OAM) coordinates
 The English ROM's archive is unpacked to build/en_nx on first use (again when the ROM is newer).
 
-usage: python tools/prompt_templates.py      -> port/src/prompt_templates.inc
+usage: python tools/prompt_templates.py          -> port/src/prompt_templates.inc
+       python tools/prompt_templates.py --empty  -> port/src/prompt_templates_none.inc (no templates: the
+                                                    port builds without the cut game graphics, icons stay DS)
 """
 import os, sys
 from PIL import Image
@@ -221,7 +223,8 @@ def main():
            '};', '']
     entries = []
     masks = {}
-    for t in TEMPLATES:
+    empty = '--empty' in sys.argv
+    for t in ([] if empty else TEMPLATES):
         x0, y0, x1, y1 = t['rect']
         ox = oy = 0
         if t['ref'].startswith('asset:'):
@@ -305,7 +308,7 @@ def main():
             'true' if t.get('compact') else 'false', 'true' if t.get('shape') else 'false',
             cx2, cy2, *box, ty, t.get('shadow', 0)))
     out += ['', 'static const PromptTemplate kPromptTemplates[] = {'] + entries + ['};']
-    path = os.path.join(ROOT, 'port', 'src', 'prompt_templates.inc')
+    path = os.path.join(ROOT, 'port', 'src', 'prompt_templates_none.inc' if empty else 'prompt_templates.inc')
     open(path, 'w', newline='\n').write('\n'.join(out) + '\n')
     print('wrote', path, len(entries), 'templates')
 
